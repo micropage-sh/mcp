@@ -1,0 +1,124 @@
+[site]
+title: Ember & Salt
+description: Wood-fired kitchen and craft cocktail bar in the heart of the city
+logo: <- logo.svg
+favicon: <- favicon.svg
+colors:
+  primary: #c1432d
+  secondary: #8b2c17
+  warning: #e8a02a
+
+[site.dark]
+colors:
+  primary: #e05a40
+  secondary: #c1432d
+
+[nav]
+Menu -> /
+About -> /about
+Reservations -> /reservations
+
+[footer]
+/// section bg:dark text:light
+
+col:
+  h5: EMBER & SALT
+  p: 142 North Market Street
+  p: Open Tuesday–Sunday, 5 pm – 11 pm
+
+col:
+  link: Instagram -> https://instagram.com
+  link: Yelp -> https://yelp.com
+  link: Google Maps -> https://maps.google.com
+
+col:
+  p: Reservations recommended on weekends.
+  link: Book a table -> /reservations
+
+
+[Menu -> /]
+
+/// hero bg:dark text:light
+h1: Fire. Smoke. Salt.
+p: We cook over an open wood hearth. Everything is made in-house — from the pasta to the pickles to the ice cream.
+button: Book a table -> /reservations
+btn-secondary: View full menu -> /menu
+
+/// section
+h2: From the kitchen
+
+col:
+  h3: Burrata & Heirloom Tomato
+  p: Stone-fruit vinaigrette, basil oil, toasted hazelnuts. Seasonal.
+  small: Starter — $18
+
+col:
+  h3: Hand-Rolled Pappardelle
+  p: Braised short rib, rosemary jus, Parmigiano Reggiano.
+  small: Pasta — $32
+
+col:
+  h3: Wood-Fired Half Chicken
+  p: Spatchcocked over oak, herb butter, roasted garlic aioli, market greens.
+  small: Main — $38
+
+/// section bg:primary-subtle
+h2: Signature cocktails
+
+col:
+  h3: Ember Old Fashioned
+  p: Smoked rye, demerara, orange peel, Angostura.
+
+col:
+  h3: Salt & Citrus Sour
+  p: Mezcal, yuzu, egg white, black lava salt rim.
+
+col:
+  h3: Garden Mule
+  p: House ginger beer, cucumber vodka, fresh mint, lime.
+
+
+[About -> /about]
+
+/// section align:center
+h1: A kitchen built on fire
+
+col:
+  p: Ember & Salt started in 2019 as a pop-up at the Fulton Farmers Market. We outgrew our tent. Now we have a wood-burning hearth, a walk-in full of heritage-breed pork and local vegetables, and a bar that takes its bitters seriously.
+
+col:
+  p: Chef Rena Kowalski spent twelve years in Lyon before returning to open the restaurant she always wanted: unpretentious, ingredient-driven, and stubbornly seasonal.
+
+/// section
+h2: Awards & press
+
+col:
+  icon: bi bi-award
+  h3: Best New Restaurant
+  p: City & State Dining Guide, 2022
+
+col:
+  icon: bi bi-newspaper
+  h3: Featured in Eater
+  p: "One of the most exciting wood-fire openings of the year."
+
+col:
+  icon: bi bi-star
+  h3: Michelin Bib Gourmand
+  p: Recognized for exceptional value and quality, 2023 guide.
+
+
+[Reservations -> /reservations]
+
+/// section
+h1: Reserve a table
+p: We hold tables up to 48 hours in advance. Walk-ins welcome at the bar.
+
+form: reservation
+input: Full name*
+input: Email*
+input: Phone
+select: Party size [1, 2, 3–4, 5–6, 7+]
+select: Preferred time [5:00 pm, 6:00 pm, 7:00 pm, 8:00 pm, 9:00 pm]
+text: Special requests or dietary needs
+submit: Request reservation

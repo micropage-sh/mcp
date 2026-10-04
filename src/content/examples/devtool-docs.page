@@ -1,0 +1,181 @@
+[site]
+title: Fluxline
+description: Open-source event streaming SDK for TypeScript and Go
+logo: <- logo.svg
+favicon: <- favicon.svg
+colors:
+  primary: #0d9488
+  secondary: #0f766e
+  info: #0891b2
+
+[site.dark]
+colors:
+  primary: #2dd4bf
+  secondary: #14b8a6
+
+[nav]
+Home -> /
+Docs -> /docs
+Pricing -> /pricing
+GitHub -> https://github.com
+
+[footer]
+/// section bg:dark text:light
+
+col:
+  h5: FLUXLINE
+  p: Open source under Apache 2.0
+  link: GitHub -> https://github.com
+
+col:
+  link: Documentation -> /docs
+  link: Changelog -> /changelog
+  link: Status -> https://status.fluxline.dev
+
+col:
+  p: Fluxline is maintained by a small team and community contributors.
+  link: Contributing guide -> /contributing
+
+
+[Home -> /]
+
+/// section bg:dark text:light
+h5: OPEN SOURCE · TYPESCRIPT · GO
+h1: Stream events without the boilerplate.
+p: Fluxline is a lightweight SDK for publishing, subscribing to, and replaying ordered event streams. Works with your existing message broker — no new infrastructure required.
+
+////
+  html: <pre><code>import { Fluxline } from 'fluxline'
+
+const client = new Fluxline({ brokerUrl: process.env.BROKER_URL })
+await client.publish('orders', { id: 'ord_01', total: 49.00 })</code></pre>
+
+col:
+  button: Get started -> /docs
+  btn-secondary: View on GitHub -> https://github.com
+
+col:
+  p: v1.4.2 · 2.1 kB gzipped · Zero runtime dependencies
+
+/// section
+h2: Why Fluxline
+
+col:
+  icon: bi bi-lightning-charge
+  h3: Under 3 kB
+  p: The TypeScript client ships at 2.1 kB gzipped. The Go client is a single file you can vendor.
+
+col:
+  icon: bi bi-arrow-repeat
+  h3: Replay from any offset
+  p: Seek back to any sequence number and replay events forward. Works with Kafka, NATS, and Redis Streams.
+
+col:
+  icon: bi bi-shield-check
+  h3: Exactly-once delivery
+  p: Idempotent producer IDs and consumer group offsets give you strong delivery guarantees out of the box.
+
+/// section bg:primary-subtle
+h2: Framework integrations
+
+col:
+  h3: Next.js / Remix
+  p: Server action helpers and route handler bindings. Automatically infer event types from your Zod schemas.
+
+col:
+  h3: Hono & Fastify
+  p: Middleware that turns any route into an event source. Streaming responses with backpressure handling.
+
+col:
+  h3: Go net/http
+  p: Handler adapter for standard Go HTTP servers. No generics gymnastics — just plain functions.
+
+
+[Docs -> /docs]
+
+/// section
+h1: Getting started
+
+/// section bg:muted
+h2: Installation
+
+////
+  html: <pre><code># TypeScript / Node
+npm install fluxline
+
+# Go
+go get github.com/fluxline/fluxline-go</code></pre>
+
+/// section
+h2: Quick start
+
+col:
+  h3: 1. Create a client
+  p: Initialize with your broker URL and an optional namespace prefix. Credentials are read from environment variables by default.
+
+col:
+  h3: 2. Define your events
+  p: Use the TypeScript generic or Go struct tag to attach a schema. Fluxline validates before publishing and narrows the type on receive.
+
+col:
+  h3: 3. Publish and subscribe
+  p: publish() is fire-and-forget with an optional ack callback. subscribe() returns an async iterator or a channel, depending on the language.
+
+/// section
+h2: Configuration reference
+
+col:
+  h3: brokerUrl
+  p: Required. WebSocket or TCP URL for your message broker.
+
+col:
+  h3: namespace
+  p: Optional string prefix applied to all stream names. Useful for multi-tenant deployments.
+
+col:
+  h3: maxRetries
+  p: Default 3. How many times to retry a failed publish before raising an error.
+
+col:
+  h3: ackTimeout
+  p: Default 5000 ms. Time to wait for a broker ack before treating the publish as failed.
+
+
+[Pricing -> /pricing]
+
+/// section align:center
+h1: Free to start. Pay as you grow.
+p: All plans include the full SDK feature set. Pricing is based on monthly event volume.
+
+col:
+  h3: Open Source
+  p: Self-hosted, unlimited events, community support.
+  p: Always free.
+  button: Get started -> /docs
+
+col:
+  h3: Cloud
+  p: Managed broker, 10M events/month included.
+  p: $49 / month
+  button: Start free trial -> /trial
+
+col:
+  h3: Enterprise
+  p: Dedicated cluster, SLA, audit logs, SSO, custom retention.
+  p: Custom pricing
+  button: Talk to us -> /contact
+
+/// section bg:muted
+h2: Frequently asked questions
+
+col:
+  h3: Can I use my own Kafka cluster?
+  p: Yes. The SDK is broker-agnostic. The managed Cloud tier runs NATS JetStream under the hood, but the OSS version works with any NATS, Kafka, or Redis Streams backend.
+
+col:
+  h3: Is there a free trial for Cloud?
+  p: Cloud plans include a 14-day trial with no credit card required. You'll get 10M events to test with before you're charged.
+
+col:
+  h3: What counts as an event?
+  p: Any publish() call that reaches the broker. Failed attempts before retry exhaustion are not counted.

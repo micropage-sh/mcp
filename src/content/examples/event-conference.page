@@ -1,0 +1,171 @@
+[site]
+title: Frontline Summit
+description: The annual conference for product, design, and engineering leaders
+logo: <- logo.svg
+favicon: <- favicon.svg
+colors:
+  primary: #e3236d
+  secondary: #b01a55
+  info: #7c3aed
+
+[site.dark]
+colors:
+  primary: #f0457e
+  secondary: #e3236d
+
+[nav]
+Home -> /
+Schedule -> /schedule
+Speakers -> /speakers
+Register -> /register
+
+[footer]
+/// section bg:dark text:light
+
+col:
+  h5: FRONTLINE SUMMIT 2025
+  p: March 12–14, 2025
+  p: Chicago, IL — The Civic Ballroom
+
+col:
+  link: Code of conduct -> /coc
+  link: Sponsorship -> /sponsors
+  link: Contact -> /contact
+
+col:
+  p: Questions? Email us at hello@frontlinesummit.com
+
+
+[Home -> /]
+
+/// hero bg:primary text:light
+h1: Build what comes next.
+p: Frontline Summit brings together 1,200 product, design, and engineering leaders for three days of talks, workshops, and honest conversations about how software gets made.
+p: March 12–14, 2025 · Chicago
+button: Register now -> /register
+btn-secondary: View schedule -> /schedule
+
+/// section
+h2: This year's tracks
+
+col:
+  icon: bi bi-cpu
+  h3: Platform Engineering
+  p: Developer experience, internal platforms, and the golden path between speed and stability.
+
+col:
+  icon: bi bi-palette
+  h3: Product Design at Scale
+  p: Design systems, accessibility debt, and leading creative work in a fast-moving org.
+
+col:
+  icon: bi bi-people
+  h3: Leadership & Culture
+  p: Hiring, retention, psychological safety, and building teams that survive hypergrowth.
+
+/// section bg:muted
+h2: Formats
+
+col:
+  h3: Keynotes
+  p: Six 45-minute talks from practitioners who've shipped things that mattered.
+
+col:
+  h3: Deep-dive workshops
+  p: Half-day sessions capped at 30 attendees. Hands-on, no slides, all practice.
+
+col:
+  h3: Open hallway track
+  p: Unscheduled space for spontaneous conversations. Some of the best talks happen here.
+
+
+[Schedule -> /schedule]
+
+/// section
+h1: Schedule at a glance
+
+/// section bg:primary-subtle
+h2: Day 1 — March 12
+
+col:
+  h3: 9:00 am — Opening keynote
+  p: "The Decade of the Platform" — keynote by Mira Okonkwo, VP Engineering at Lattice.
+
+col:
+  h3: 11:00 am — Workshop block A
+  p: Choose from: Incident culture, Design sprints for complex features, Staff eng career paths.
+
+col:
+  h3: 2:00 pm — Lightning talks
+  p: Eight 10-minute talks from speakers selected from the open CFP.
+
+/// section
+h2: Day 2 — March 13
+
+col:
+  h3: 9:30 am — Keynote
+  p: "Shipping with Confidence" — how Vercel restructured their deploy pipeline and reduced rollbacks by 60%.
+
+col:
+  h3: 1:00 pm — Panel
+  p: "AI in the dev workflow: what's actually working" — four engineering leaders, unfiltered.
+
+col:
+  h3: 4:00 pm — Unconference
+  p: Participant-led sessions. Vote on topics in the morning, run sessions in the afternoon.
+
+
+[Speakers -> /speakers]
+
+/// section align:center
+h1: Featured speakers
+
+col:
+  h3: Mira Okonkwo
+  p: VP Engineering, Lattice
+  p: Scaling platform teams from 12 to 120 engineers without losing the culture.
+
+col:
+  h3: Dev Patel
+  p: Staff Engineer, Linear
+  p: Real-time sync architecture and the tradeoffs nobody talks about.
+
+col:
+  h3: Carmen Estrada
+  p: Head of Design, Figma
+  p: Building a design system that 4,000 designers actually use.
+
+/// section
+h2: Call for proposals
+
+col:
+  p: We select 30% of our program from open CFP submissions. If you've solved a hard problem and want to share it, we want to hear from you.
+  button: Submit a proposal -> /cfp
+
+col:
+  p: CFP closes January 15, 2025. Decisions sent by February 1. Travel and hotel covered for selected speakers.
+
+
+[Register -> /register]
+
+/// section
+h1: Get your ticket
+p: Early-bird pricing ends December 1. Workshop seats are limited and sell out first.
+
+col:
+  h3: Conference pass
+  p: Full three-day access, all keynotes and lightning talks, hallway track.
+  p: $799 early bird / $999 standard
+  button: Register -> /checkout
+
+col:
+  h3: Conference + Workshop
+  p: Everything in the conference pass plus one half-day workshop of your choice.
+  p: $1,199 early bird / $1,499 standard
+  button: Register -> /checkout
+
+col:
+  h3: Team of 5
+  p: Five conference passes at a 20% discount. Invoice billing available.
+  p: $3,196 (saves $800)
+  button: Contact us -> /contact

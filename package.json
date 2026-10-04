@@ -24,7 +24,9 @@
     "smoke": "tsx scripts/smoke.ts",
     "inspect": "npx -y @modelcontextprotocol/inspector tsx src/index.ts",
     "check": "node scripts/check-publishable.mjs",
-    "prepublishOnly": "npm run build && node scripts/check-publishable.mjs"
+    "prepublishOnly": "npm run build && node scripts/check-publishable.mjs && node scripts/check-content-drift.mjs --strict",
+    "sync-content": "node scripts/sync-content.mjs",
+    "check-content": "node scripts/check-content-drift.mjs"
   },
   "keywords": [
     "mcp",

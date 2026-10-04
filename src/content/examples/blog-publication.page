@@ -1,0 +1,158 @@
+[site]
+title: The Long Read
+description: Reporting and essays on technology, cities, and the people who build them
+logo: <- logo.svg
+favicon: <- favicon.svg
+colors:
+  primary: #1f2937
+  secondary: #374151
+  danger: #b91c1c
+
+[site.dark]
+colors:
+  primary: #f9fafb
+  secondary: #e5e7eb
+  danger: #ef4444
+
+[nav]
+Latest -> /
+Archive -> /archive
+About -> /about
+Subscribe -> /subscribe
+
+[footer]
+/// section
+
+col:
+  h5: THE LONG READ
+  p: Published weekly. No ads. Reader-supported.
+
+col:
+  link: Twitter -> https://twitter.com
+  link: RSS -> /feed.xml
+  link: Archive -> /archive
+
+col:
+  p: Tips and story ideas: tips@thelongread.io
+  p: Licensing: rights@thelongread.io
+
+
+[Latest -> /]
+
+/// section
+h1: Latest stories
+
+col:
+  h3: The Fiber Wars
+  p: Why three companies are spending $80 billion to wire the same neighborhoods — and who loses when they all pull back.
+  small: Infrastructure · 22 min read
+
+col:
+  h3: What Happened to the Promise of Smart Cities
+  p: A decade ago, Sidewalk Toronto was supposed to prove that data could make urban life better. Here's what we learned from its failure.
+  small: Cities · 18 min read
+
+col:
+  h3: The Engineer Who Said No
+  p: When Priya Nair refused to ship a feature she thought was dangerous, she lost her job. Two years later, she's not sure she'd do it differently.
+  small: Profile · 14 min read
+
+/// section bg:muted
+h2: From the archive
+
+col:
+  h3: The Last Payphone
+  p: New York's final payphone came down in May 2022. We spent a day with the crew that removed it.
+  small: Cities · 8 min read
+
+col:
+  h3: Chasing the Algorithm
+  p: A content moderation contractor describes 18 months of reading the internet's worst content so you don't have to.
+  small: Technology · 26 min read
+
+col:
+  h3: Where Did the Mid-Size City Go?
+  p: Population data tells one story. Walking around Youngstown, Ohio tells another.
+  small: Cities · 15 min read
+
+/// section bg:danger text:light align:center
+h2: Become a supporting reader.
+p: The Long Read is fully reader-supported. No investors, no brand deals, no tracking. A subscription covers our editorial costs and keeps the site ad-free.
+button: Subscribe — $10/month -> /subscribe
+btn-secondary: Gift a subscription -> /gift
+
+
+[Archive -> /archive]
+
+/// section
+h1: All stories
+
+/// section
+h2: Technology
+
+col:
+  link: The Fiber Wars -> /stories/fiber-wars
+  link: Chasing the Algorithm -> /stories/chasing-algorithm
+  link: Who Owns the Sidewalk Data? -> /stories/sidewalk-data
+  link: The Quiet Monopoly -> /stories/quiet-monopoly
+
+/// section
+h2: Cities
+
+col:
+  link: What Happened to the Promise of Smart Cities -> /stories/smart-cities
+  link: The Last Payphone -> /stories/last-payphone
+  link: Where Did the Mid-Size City Go? -> /stories/mid-size-city
+  link: Living on the Heat Map -> /stories/heat-map
+
+
+[About -> /about]
+
+/// section
+h1: About The Long Read
+
+col:
+  p: The Long Read was started in 2021 by two journalists who were tired of writing to SEO briefs. We publish one to two pieces a week — long-form reported stories and essays about technology and the built environment.
+
+col:
+  p: We have no investors, no editorial board, and no algorithmic pressures. If something takes six months to report properly, we take six months.
+
+/// section align:center
+h2: Our editorial standards
+
+col:
+  icon: bi bi-incognito
+  h3: No tracking
+  p: We collect no analytics, no behavioral data, no ad pixels. Your reading is your own.
+
+col:
+  icon: bi bi-journal-check
+  h3: Named sources
+  p: We don't publish anonymously sourced claims without a documented reason. We always try to give subjects the chance to respond.
+
+col:
+  icon: bi bi-archive
+  h3: Everything stays up
+  p: We don't delete stories. If we get something wrong, we publish a correction and leave both up.
+
+
+[Subscribe -> /subscribe]
+
+/// section
+h1: Support independent journalism
+p: Subscribers get all stories in their inbox each week, access to the full archive, and the knowledge that this publication exists because of them.
+
+col:
+  h3: Monthly
+  p: $10 per month. Cancel any time.
+  button: Subscribe monthly -> /checkout/monthly
+
+col:
+  h3: Annual
+  p: $90 per year — save $30.
+  button: Subscribe annually -> /checkout/annual
+
+col:
+  h3: Founding reader
+  p: $200 per year. Your name in our annual supporters list.
+  button: Become a founding reader -> /checkout/founding

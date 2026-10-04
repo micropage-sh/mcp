@@ -1,0 +1,45 @@
+[site]
+title: Components — Pricing & Forms
+description: Pricing tables and form patterns for reuse
+logo: <- logo.svg
+favicon: <- favicon.svg
+
+[nav]
+Home -> /
+
+[Home -> /]
+
+/// section
+h2: Pricing table (three tiers)
+
+col:
+  img: <- pricing-cards
+  h3: Starter
+  p: For small experiments and side projects.
+  p: 1 project, basic assets, 100 form submissions.
+  button: Choose starter -> /signup
+
+col:
+  h3: Growth
+  p: For active products and teams.
+  p: More projects, higher limits, email digests.
+  button: Choose growth -> /signup
+
+col:
+  h3: Scale
+  p: For agencies and high-traffic launches.
+  p: Priority queue, higher limits, dedicated support.
+  button: Talk to us -> /contact
+
+/// section
+h2: Contact form with extra fields
+
+form: contact
+input: Name*
+input: Email*
+input: Company
+select: Budget [< $1k, $1k–$5k, $5k–$20k, > $20k]
+checkboxes: Interested in [Design, Development, Copywriting]
+text: Project details
+submit: Request a quote
+

@@ -1,0 +1,84 @@
+[site]
+title: Color System Examples
+description: Reference for bg:, align:, and text: section modifiers
+colors:
+  primary: #5c6fff
+
+[site.dark]
+colors:
+  primary: #8ba2ff
+
+[nav]
+Home -> /
+
+[Home -> /]
+
+/// hero bg:primary
+h1: Colored hero section
+p: This hero uses the primary brand color as background. Text contrast is auto-computed from luminance.
+button: Get started -> /signup
+
+/// section bg:primary-subtle
+h2: Primary subtle background
+p: A 12% tint of the primary color — good for alternating sections without full saturation.
+
+/// section
+h2: Default section (top-aligned columns)
+p: No bg modifier. Columns align to the top by default — better for unequal-height cards and pricing grids.
+
+col:
+  h3: Card A
+  p: Short content.
+
+col:
+  h3: Card B
+  p: Longer content that stays aligned at the top instead of centering, giving a cleaner grid layout.
+
+col:
+  h3: Card C
+  p: A third card to demonstrate top alignment across the row.
+
+/// section bg:dark text:light
+h2: Dark background
+p: Use text:light when you need an explicit contrast override, such as for dark or custom-colored backgrounds.
+
+/// section bg:muted
+h2: Muted background
+p: Uses Bootstrap's secondary background variable — a subtle surface tint that respects both light and dark themes.
+
+/// section bg:success
+h2: Bootstrap semantic — success
+p: Bootstrap semantic tokens (success, warning, info, danger, dark, light) work without defining any brand colors.
+
+/// section bg:warning
+h2: Bootstrap semantic — warning
+p: Warning uses dark text automatically for readability.
+
+/// section bg:info
+h2: Bootstrap semantic — info
+
+/// section bg:danger
+h2: Bootstrap semantic — danger
+
+/// section align:center
+h2: Center-aligned columns
+p: Use align:center for image-and-text split layouts where vertical centering looks intentional.
+
+col:
+  img: <- workspace
+
+col:
+  h3: Paired with image
+  p: Vertically centred next to the image on large screens.
+
+/// section bg:primary align:center
+h2: Combined — primary background, center aligned
+p: Modifiers compose freely. Any bg: can be paired with align: or text:.
+
+col:
+  h3: Left column
+  p: Feature one.
+
+col:
+  h3: Right column
+  p: Feature two.

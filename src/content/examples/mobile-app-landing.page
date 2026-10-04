@@ -1,0 +1,77 @@
+[site]
+title: PocketTrack
+description: Mobile app template for simple tracking and insights
+logo: <- logo.svg
+favicon: <- favicon.svg
+
+[nav]
+Home -> /
+Features -> /features
+Download -> /download
+
+[footer]
+/// section
+
+col:
+  p: PocketTrack — simple habit tracking for iOS and Android.
+
+col:
+  p: Questions or feedback? We’d love to hear from you.
+
+col:
+  link: Help center -> /support
+  link: Privacy -> /privacy
+
+
+[Home -> /]
+
+/// hero
+h1: Track the habits that matter
+p: PocketTrack is a simple mobile app that helps you log habits, see progress, and stay motivated.
+img: <- mobile-dashboard
+button: Download for iOS -> /download
+button: Download for Android -> /download
+
+/// section
+h2: Why PocketTrack
+
+col:
+  icon: bi bi-check-circle
+  h3: Lightweight
+  p: Add habits in seconds, check them off with a tap.
+
+col:
+  icon: bi bi-graph-up
+  h3: Clear progress
+  p: See streaks and trends on a simple timeline.
+
+col:
+  icon: bi bi-moon
+  h3: Dark mode ready
+  p: Looks great day or night.
+
+
+[Features -> /features]
+
+/// section
+h1: Built for everyday use
+
+col:
+  h3: Daily reminders
+  p: Stay on track with gentle nudges at the times you choose.
+
+col:
+  h3: Flexible categories
+  p: Group habits by health, work, relationships, or anything else you care about.
+
+
+[Download -> /download]
+
+/// section
+h1: Get the app
+p: PocketTrack is available for iOS and Android.
+
+col:
+  button: Download on the App Store -> https://example.com/app-store
+  button: Get it on Google Play -> https://example.com/google-play
+

@@ -1,0 +1,75 @@
+[site]
+title: Studio Arc
+description: Minimal portfolio for designers and developers
+logo: <- logo.svg
+favicon: <- favicon.svg
+
+[nav]
+Work -> /
+About -> /about
+Contact -> /contact
+
+[footer]
+/// section
+
+col:
+  p: Studio Arc — independent design and development studio.
+
+col:
+  p: Based in Copenhagen. Available for remote projects worldwide.
+
+col:
+  link: Email -> mailto:hello@example.com
+  link: LinkedIn -> https://linkedin.com
+
+
+[Work -> /]
+
+/// hero
+h1: Selected work
+p: A curated set of projects, case studies, and experiments.
+
+/// section
+h2: Projects
+
+col:
+  h3: Aurora UI
+  p: Design system and component library for a SaaS dashboard.
+  p: Role — Product design, front-end implementation.
+
+col:
+  h3: Field Notes
+  p: Journal-style blog for long-form writing.
+  p: Role — Visual direction, typography, layout.
+
+col:
+  h3: Signal Studio
+  p: Landing page for a creative agency with strong typography.
+  p: Role — Branding, layout, content.
+
+
+[About -> /about]
+
+/// section align:center
+h1: About Studio Arc
+
+col:
+  p: Studio Arc is a small, opinionated practice focused on clear typography, simple layouts, and fast-loading pages.
+
+col:
+  p: This example shows a text-heavy layout that you can adapt for your own bio or company story.
+
+
+[Contact -> /contact]
+
+/// section
+h1: Get in touch
+p: Share a short brief and we’ll reply with availability.
+
+form: contact
+input: Name*
+input: Email*
+text: Project summary
+text: Budget and timeline
+submit: Send
+

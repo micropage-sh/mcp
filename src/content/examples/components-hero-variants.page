@@ -1,0 +1,28 @@
+[site]
+title: Hero Variants
+description: Component-only examples for hero sections
+logo: <- logo.svg
+favicon: <- favicon.svg
+
+[nav]
+Home -> /
+
+[Home -> /]
+
+/// hero
+h1: Simple hero with single CTA
+p: Great for minimal landing pages and focused campaigns.
+button: Get started -> /signup
+
+/// hero
+h1: Hero with supporting media
+p: Pair copy with an image or illustration on the side.
+img: workspace.jpg
+button: Learn more -> /tour
+button: View docs -> https://docs.micropage.sh
+
+/// hero
+h1: Centered hero with subtle subheading
+p: Use this pattern when you want to make a single message stand out.
+button: Join the beta -> /beta
+

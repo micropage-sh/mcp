@@ -1,0 +1,130 @@
+[site]
+title: Slab Studio
+description: Brand, digital, and motion design for companies that want to stand out
+logo: <- logo.svg
+favicon: <- favicon.svg
+colors:
+  primary: #111111
+  secondary: #333333
+  danger: #ff6b35
+
+[site.dark]
+colors:
+  primary: #f5f5f5
+  secondary: #cccccc
+
+[nav]
+Work -> /
+Studio -> /studio
+Contact -> /contact
+
+[footer]
+/// section bg:dark text:light
+
+col:
+  h5: SLAB STUDIO
+  p: Brand — Digital — Motion
+  p: Brooklyn, New York
+
+col:
+  link: LinkedIn -> https://linkedin.com
+  link: Dribbble -> https://dribbble.com
+  link: Instagram -> https://instagram.com
+
+col:
+  p: New projects: hello@slabstudio.co
+  p: Press: press@slabstudio.co
+
+
+[Work -> /]
+
+/// section align:center
+h1: We make things look like they mean it.
+p: Slab Studio is a seven-person brand and digital studio. We work with founders and creative directors who know what they want and need a team that can build it.
+
+/// section
+h2: Selected projects
+
+col:
+  h3: Cinder — Brand Identity
+  p: End-to-end identity for a B2B fintech: wordmark, color system, motion guidelines, and a component library used across three product surfaces.
+  small: Fintech · 2024
+
+col:
+  h3: Waypoint — Campaign
+  p: Product launch campaign for a logistics SaaS — visual language, video direction, and a microsite that converted at 4.2%.
+  small: Logistics · 2024
+
+col:
+  h3: Olive & Thread — Packaging
+  p: Rebranded a sustainable fashion label from logo to hangtag to e-commerce photography direction.
+  small: Fashion · 2023
+
+/// section bg:muted
+h2: More work
+
+col:
+  h3: Nova Health — Digital Product
+  p: Design system and patient-facing app UI for a telehealth platform. Accessibility-first, WCAG 2.1 AA.
+  small: Health tech · 2023
+
+col:
+  h3: Paloma Records — Art Direction
+  p: Album artwork, lyric video direction, and social templates for four releases.
+  small: Music · 2023
+
+col:
+  h3: Fieldwork Brewing — Web
+  p: Responsive marketing site with custom animations, tap room finder, and e-commerce integration.
+  small: Food & beverage · 2022
+
+
+[Studio -> /studio]
+
+/// section
+h1: About Slab
+
+col:
+  p: We started Slab in 2018 after leaving larger agencies because we wanted to do fewer projects, better. Seven people, no junior-to-senior ratio games, no account managers between you and the work.
+
+col:
+  p: Everyone at Slab touches client work. Our lead designer also codes. Our strategist also writes. That's on purpose.
+
+/// section align:center
+h2: How we work
+
+col:
+  icon: bi bi-chat-square-text
+  h3: Discovery
+  p: Two-week engagement to align on objectives, audiences, and success criteria before any creative begins.
+
+col:
+  icon: bi bi-easel
+  h3: Creative development
+  p: Three rounds of feedback with clear decision points. No endless-revision contracts.
+
+col:
+  icon: bi bi-box-arrow-up-right
+  h3: Handoff
+  p: Full source files, a brand guidelines document, and a 30-day support window after launch.
+
+/// section bg:dark text:light align:center
+h2: We work with clients who ship.
+p: Not committees. Not approvals-by-committee. Founders, CPOs, and creative directors with the authority to make decisions and the taste to know a good one.
+button: Start a conversation -> /contact
+
+
+[Contact -> /contact]
+
+/// section
+h1: Start a project
+p: Tell us what you're building and why it matters. We'll come back within 48 hours.
+
+form: intake
+input: Name*
+input: Email*
+input: Company
+select: Project type [Brand identity, Web design, Campaign, Motion, Product design, Other]
+select: Approximate budget [$20k–$50k, $50k–$100k, $100k+, Not sure yet]
+text: Tell us about the project*
+submit: Send brief

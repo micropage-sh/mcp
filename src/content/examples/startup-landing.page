@@ -1,0 +1,100 @@
+[site]
+title: Launchpad
+description: Opinionated starter for SaaS and product launches
+logo: <- logo.svg
+favicon: <- favicon.svg
+
+[nav]
+Home -> /
+Pricing -> /pricing
+Contact -> /contact
+
+[footer]
+/// section
+
+col:
+  p: © {year} Launchpad. All rights reserved.
+
+col:
+  link: Docs -> https://docs.micropage.sh
+  link: Status -> /status
+
+col:
+  link: Twitter -> https://twitter.com
+  link: GitHub -> https://github.com
+
+
+[Home -> /]
+
+/// hero
+h1: Ship a polished site in minutes
+p: Launchpad gives you a fast, opinionated starting point for SaaS landing pages.
+img: aspect:16x9 <- product-dashboard
+button: Get started -> /pricing
+button: View docs -> https://docs.micropage.sh
+
+/// section
+h5: WHY LAUNCHPAD
+
+col:
+  icon: bi bi-rocket
+  h3: Built for speed
+  p: Start from a working layout instead of a blank page.
+
+col:
+  icon: bi bi-layers
+  h3: Structured content
+  p: Use sections, columns, and components with predictable behavior.
+
+col:
+  icon: bi bi-stars
+  h3: AI-friendly
+  p: Optimized so AI agents can safely propose edits and variants.
+
+/// section
+h2: Features
+
+col:
+  h3: Simple syntax
+  p: Micropage uses a compact text format instead of HTML templates.
+
+col:
+  h3: Static output
+  p: Generate static pages that deploy anywhere.
+
+col:
+  h3: Forms built in
+  p: Capture leads and messages without wiring up a backend.
+
+
+[Pricing -> /pricing]
+
+/// section align:center
+h1: Simple pricing
+p: Start for free, upgrade only when your site grows.
+
+col:
+  h3: Free
+  p: For experiments and personal projects.
+  p: 1 project, basic assets, 100 form submissions.
+  button: Get started -> /contact
+
+col:
+  h3: Pro
+  p: For serious launches and small teams.
+  p: More projects, assets, and priority queue.
+  button: Talk to sales -> /contact
+
+
+[Contact -> /contact]
+
+/// section
+h1: Contact us
+p: Tell us about your project and we’ll follow up.
+
+form: contact
+input: Name*
+input: Email*
+text: What are you launching?
+submit: Send message
+
