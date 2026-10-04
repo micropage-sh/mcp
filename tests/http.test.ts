@@ -251,3 +251,16 @@ describe("publishPost plan refusals", () => {
     await expect(publishPost(makeHttp(fake), 7, "hello")).rejects.toMatchObject({ code: "PLAN_LIMIT", status: 402 });
   });
 });
+
+describe("planRequiredError message", () => {
+  it("drops a relative upgrade hint written for the editor", async () => {
+    const { planRequiredError } = await import("../src/client/errors.js");
+    const err = planRequiredError({
+      error: "Newsletter sends require a Pro plan. Upgrade at /pricing.",
+      code: "plan_required",
+      required_tier: "pro",
+      upgrade_url: "https://micropage.sh/pricing",
+    });
+    expect(err?.message).toBe("Newsletter sends require a Pro plan. Upgrade at https://micropage.sh/pricing.");
+  });
+});

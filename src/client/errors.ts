@@ -53,8 +53,12 @@ export function planRequiredError(data: unknown, options: MicropageErrorOptions 
   const body = data as Record<string, unknown>;
   if (body.code !== "plan_required") return null;
   const tierLabel = body.required_tier === "pro_plus" ? "Pro+" : body.required_tier === "pro" ? "Pro" : null;
+  // Server messages written for the editor may end in a relative "Upgrade at /pricing.";
+  // drop it so the absolute link below is the only one.
+  const serverReason =
+    typeof body.error === "string" ? body.error.trim().replace(/\s*Upgrade at \S+$/i, "").trim() : "";
   const reason =
-    (typeof body.error === "string" && body.error.trim()) ||
+    serverReason ||
     `This needs ${tierLabel ? `the ${tierLabel} plan` : "a higher micropage plan"}.`;
   const url = (typeof body.upgrade_url === "string" && body.upgrade_url) || PRICING_URL;
   const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
