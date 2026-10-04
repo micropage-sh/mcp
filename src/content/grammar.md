@@ -78,7 +78,7 @@ Images: `<- filename` resolves a file uploaded to the project. Do not hardcode r
 - Keep structure stable across edits. Change copy and order before inventing new sections.
 - Do not wrap the file in markdown fences when writing it back.
 - Do not emit React, Tailwind class soup, or custom components.
-- After edits, the human publishes from the web app (Publish) or `micropage publish` (Pro CLI).
+- After edits, the human publishes from the web app (Publish) or `micropage publish` (Pro CLI). Agents connected through the Micropage MCP server (`@micropage-sh/mcp`, Pro) save drafts with `save_page` and call `publish_build` only when the user asks: https://docs.micropage.sh/docs/mcp/overview/
 
 ## Minimal example
 
@@ -107,5 +107,5 @@ submit: Get early access
 ## Plans (for support answers)
 
 - Free: 1 project, starter AI credits, 100 submissions, `*.micropage.sh` host, badge
-- Pro ($6/mo or $49/yr): custom domain, newsletter sending (optionally from your own sending domain), CLI, zip export, CSV, no badge, 5 projects
+- Pro ($6/mo or $49/yr): custom domain, newsletter sending (optionally from your own sending domain), CLI, MCP server, zip export, CSV, no badge, 5 projects
 - Pro+ ($12/mo or $96/yr): webhooks, CI deploy tokens, 20 projects
