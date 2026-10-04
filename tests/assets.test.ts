@@ -9,9 +9,13 @@ import {
   MAX_ASSET_BYTES,
   assertContentMatchesExtension,
   buildUploadForm,
+  hasSvgRoot,
+  isPrivateAddress,
   loadAssetSource,
   uploadAsset,
+  urlHostLookup,
   validateAssetFilename,
+  type HostLookup,
 } from "../src/client/assets.js";
 import { MicropageError } from "../src/client/errors.js";
 import { createFakeFetch, makeHttp, type RecordedCall } from "./helpers/fake-fetch.js";
@@ -74,12 +78,86 @@ describe("assertContentMatchesExtension", () => {
   });
 });
 
+describe("SVG root check", () => {
+  it("accepts a plain svg, and one after an xml declaration, comments and an svg doctype", () => {
+    expect(hasSvgRoot('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')).toBe(true);
+    expect(hasSvgRoot("\n  <svg>\n</svg>")).toBe(true);
+    expect(
+      hasSvgRoot(
+        '\uFEFF<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<!-- Generator: Inkscape -->\n' +
+          '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n' +
+          "<!-- a second comment -->\n<svg width=\"10\" height=\"10\"/>",
+      ),
+    ).toBe(true);
+    assertContentMatchesExtension("a.svg", Buffer.from('<?xml version="1.0"?><!--c--><!DOCTYPE svg><svg/>'));
+  });
+
+  it("rejects an HTML page with an inline svg", async () => {
+    const html = '<!DOCTYPE html>\n<html><body><svg viewBox="0 0 1 1"></svg><script>alert(1)</script></body></html>';
+    expect(hasSvgRoot(html)).toBe(false);
+    expect(hasSvgRoot('<html><svg xmlns="http://www.w3.org/2000/svg"></svg></html>')).toBe(false);
+    await expectCode(() => assertContentMatchesExtension("icon.svg", Buffer.from(html)), "INVALID_ASSET", /not a valid SVG/);
+  });
+
+  it("rejects an XML config that only mentions <svg> in a comment", () => {
+    expect(hasSvgRoot('<?xml version="1.0"?>\n<!-- <svg> -->\n<config><secret>hunter2</secret></config>')).toBe(false);
+    expect(hasSvgRoot("<!-- <svg> --><settings/>")).toBe(false);
+  });
+
+  it("rejects a non-svg root after an xml declaration, and other prologs", () => {
+    expect(hasSvgRoot('<?xml version="1.0"?><plist version="1.0"><dict/></plist>')).toBe(false);
+    expect(hasSvgRoot('<?xml version="1.0"?><svgx/>')).toBe(false);
+    expect(hasSvgRoot('<!DOCTYPE html><svg/>')).toBe(false);
+    expect(hasSvgRoot('<!DOCTYPE svg [<!ENTITY x "y">]><svg/>')).toBe(false);
+    expect(hasSvgRoot('<?xml-stylesheet href="a.css"?><svg/>')).toBe(false);
+    expect(hasSvgRoot("<!-- never closed <svg/>")).toBe(false);
+    expect(hasSvgRoot("svg")).toBe(false);
+  });
+});
+
+describe("isPrivateAddress", () => {
+  it("refuses loopback, RFC1918, link-local, CGNAT, this-network, multicast and reserved IPv4", () => {
+    for (const ip of [
+      "127.0.0.1", "127.255.0.9", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+      "169.254.169.254", "100.64.0.1", "100.127.255.255", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.1.1.1", "255.255.255.255",
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
+  it("refuses ::1, ::, link-local fe80::/10, ULA fc00::/7, multicast and IPv4-mapped forms of private IPv4", () => {
+    for (const ip of [
+      "::1", "::", "fe80::1", "febf::1", "fc00::1", "fd12:3456::1", "ff02::1",
+      "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "::ffff:10.0.0.1", "::127.0.0.1",
+      "fe80::1%eth0",
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
+  it("allows public addresses", () => {
+    for (const ip of ["93.184.216.34", "1.1.1.1", "100.63.255.255", "100.128.0.1", "172.32.0.1", "2606:4700::6810:84e5", "::ffff:93.184.216.34"]) {
+      expect(isPrivateAddress(ip), ip).toBe(false);
+    }
+  });
+
+  it("treats anything that is not an IP as unsafe", () => {
+    expect(isPrivateAddress("not-an-ip")).toBe(true);
+  });
+});
+
+/** Resolves every name to a public address, so no real DNS query is made. */
+const publicLookup: HostLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+const realLookup = urlHostLookup.current;
+
 describe("loadAssetSource", () => {
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "micropage-mcp-assets-"));
+    urlHostLookup.current = publicLookup;
   });
   afterEach(async () => {
+    urlHostLookup.current = realLookup;
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -122,6 +200,84 @@ describe("loadAssetSource", () => {
     expect(fake.calls[0]!.url).toBe("https://img.example.com/a.png");
     expect(fake.calls[0]!.headers.authorization).toBeUndefined();
     expect(fake.calls[0]!.headers.apikey).toBeUndefined();
+  });
+
+  const pngResponse = () => new Response(PNG, { headers: { "content-type": "image/png" } });
+
+  it("refuses hosts that resolve to private, local or reserved addresses, without fetching", async () => {
+    const cases: Array<[string, string]> = [
+      ["loopback", "127.0.0.1"],
+      ["RFC1918", "10.0.0.5"],
+      ["RFC1918 172.16/12", "172.20.1.1"],
+      ["RFC1918 192.168/16", "192.168.0.10"],
+      ["link-local / cloud metadata", "169.254.169.254"],
+      ["CGNAT", "100.100.1.1"],
+      ["this network", "0.0.0.0"],
+      ["multicast", "224.0.0.251"],
+      ["IPv6 loopback", "::1"],
+      ["IPv6 link-local", "fe80::abcd"],
+      ["IPv6 ULA", "fd00::1"],
+      ["IPv4-mapped loopback", "::ffff:127.0.0.1"],
+    ];
+    for (const [label, address] of cases) {
+      let fetched = 0;
+      const lookup: HostLookup = async () => [{ address, family: address.includes(":") ? 6 : 4 }];
+      const fetchImpl = async () => {
+        fetched++;
+        return pngResponse();
+      };
+      await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: fetchImpl, lookup }), "INVALID_SOURCE", /private, local or reserved/);
+      expect(fetched, label).toBe(0);
+    }
+  });
+
+  it("refuses when any one of several resolved addresses is private", async () => {
+    const lookup: HostLookup = async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.1", family: 4 },
+    ];
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: async () => pngResponse(), lookup }), "INVALID_SOURCE");
+  });
+
+  it("refuses private IP-literal hosts without resolving them", async () => {
+    const lookup: HostLookup = async () => {
+      throw new Error("must not resolve IP literals");
+    };
+    for (const url of ["https://127.0.0.1/a.png", "https://[::1]/a.png", "https://[::ffff:169.254.169.254]/a.png", "https://2130706433/a.png", "https://10.1.1.1:8443/a.png"]) {
+      await expectCode(loadAssetSource({ url }, { fetch: async () => pngResponse(), lookup }), "INVALID_SOURCE", /private, local or reserved/);
+    }
+  });
+
+  it("follows redirects by hand, checking every hop, and refuses a redirect to a private host", async () => {
+    const seen: string[] = [];
+    const hops: Record<string, Response> = {
+      "https://img.example.com/a.png": new Response(null, { status: 302, headers: { location: "https://cdn.example.net/b.png" } }),
+      "https://cdn.example.net/b.png": new Response(null, { status: 301, headers: { location: "https://internal.example.net/c.png" } }),
+    };
+    const fetchImpl = async (input: string, init?: RequestInit) => {
+      seen.push(input);
+      expect(init?.redirect).toBe("manual");
+      return hops[input] ?? pngResponse();
+    };
+    const lookup: HostLookup = async (host) =>
+      host === "internal.example.net" ? [{ address: "192.168.1.20", family: 4 }] : [{ address: "93.184.216.34", family: 4 }];
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: fetchImpl, lookup }), "INVALID_SOURCE", /192\.168\.1\.20/);
+    expect(seen).toEqual(["https://img.example.com/a.png", "https://cdn.example.net/b.png"]);
+  });
+
+  it("follows a relative redirect to a public host", async () => {
+    const fetchImpl = async (input: string) =>
+      input === "https://img.example.com/a.png" ? new Response(null, { status: 307, headers: { location: "/real.png" } }) : pngResponse();
+    expect(await loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: fetchImpl, lookup: publicLookup })).toEqual(PNG);
+  });
+
+  it("refuses a redirect to plain http and more than 5 redirects", async () => {
+    const toHttp = async () => new Response(null, { status: 302, headers: { location: "http://img.example.com/a.png" } });
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: toHttp }), "INVALID_SOURCE", /non-https/);
+    let n = 0;
+    const loop = async () => new Response(null, { status: 302, headers: { location: `https://img.example.com/${++n}.png` } });
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: loop }), "INVALID_SOURCE", /more than 5/);
+    expect(n).toBe(6);
   });
 
   it("refuses non-https URLs without fetching", async () => {

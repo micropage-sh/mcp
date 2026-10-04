@@ -1,7 +1,7 @@
 import type { CallToolResult, InputRequiredResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import * as z from "zod";
 
-import { OUT, RO, WRITE } from "../annotations.js";
+import { DESTRUCTIVE, OUT, RO, WRITE } from "../annotations.js";
 import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type SaveDraftResult } from "../client/builds.js";
 import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
@@ -451,7 +451,13 @@ export const SavePageOutput = z.object({
     .describe("Problems the compiler flagged, e.g. a referenced file that does not exist. Fix them before publishing."),
   page_count: z.number(),
   llms_txt: z.enum(["kept", "set", "removed", "none"]),
-  live: z.literal(false).describe("Always false: save_page never changes the live site."),
+  live: z
+    .literal(false)
+    .describe(
+      "Always false: saving does not deploy, and the draft does not go live by itself. But publishing, editing a published, " +
+        "unpublishing or deleting a post currently redeploys the project's active build, which is now this draft (backlog TASK-54); " +
+        "the post tools refuse that unless allow_draft_deploy is passed.",
+    ),
   preview_url: z.string().describe("Where the user can preview this draft: the project in the micropage editor."),
   live_url: z.string().nullable().describe("The public URL; it still shows the last published build."),
   next: z.string(),
@@ -482,7 +488,9 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
     preview_url: project.editor_url,
     live_url: project.live_url,
     next:
-      "Saved as a draft: it never goes live on its own. Show the user the preview_url" +
+      "Saved as a draft; it does not go live by itself. It is now the active build, so a post publish, edit of a published post, " +
+      "unpublish or delete would deploy it with the site rebuild (the post tools refuse that unless allow_draft_deploy is passed). " +
+      "Show the user the preview_url" +
       (saved.issues.length > 0 ? " and fix the issues listed" : "") +
       `, and call publish_build (build "id:${saved.build.id}", confirm: true) only when the user asks to publish.`,
   };
@@ -509,7 +517,7 @@ export const DeleteProjectInput = z
 
 export const DeleteProjectOutput = z.object({
   deleted: z.boolean(),
-  already_removed: z.boolean(),
+  already_removed: z.boolean().describe("True when the server reported the project as already gone (HTTP 404)."),
   project_id: z.number(),
   uuid: z.string(),
   domain: z.string().nullable(),
@@ -544,12 +552,22 @@ export async function runDeleteProject(
     throw new MicropageError("DECLINED", "The user declined the deletion in the confirmation prompt. Nothing was deleted.");
   }
 
+  // delete-project answers 403 both for "not yours" and for a project that is
+  // gone, so only a 404 is read as already removed. The project was resolved
+  // above, so a 403 here is a real refusal or a race, and is reported as such.
   let alreadyRemoved = false;
   try {
     await ctx.http.invoke("delete-project", { projectId: project.id });
   } catch (err) {
     if (err instanceof MicropageError && err.status === 404) alreadyRemoved = true;
-    else throw err;
+    else if (err instanceof MicropageError && err.status === 403) {
+      throw new MicropageError(
+        "DELETE_REFUSED",
+        `micropage refused to delete "${project.name ?? expected}" (HTTP 403: project not found or access denied). It may have ` +
+          "been deleted meanwhile; call get_project to check. Nothing else was changed.",
+        { status: 403, data: err.data, cause: err },
+      );
+    } else throw err;
   }
   return {
     deleted: true,
@@ -651,14 +669,15 @@ It does not write local files (it is not \`micropage projects create\`) and cann
     "save_page",
     {
       title: "Save .page source as a draft",
-      description: `Compile .page markup and save it as the project's draft build. It never goes live: call publish_build to deploy, and only when the user asks.
+      description: `Compile .page markup and save it as the project's draft build. The draft does not go live by itself: call publish_build to deploy, and only when the user asks. Caveat (backlog TASK-54): the draft becomes the active build, and publishing, editing a published, unpublishing or deleting a post currently redeploys the active build, so those would put this draft live; the post tools refuse that unless allow_draft_deploy: true is passed.
 
 Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file) and the editor URL where the user can preview the draft; drafts have no public URL.
 
 Images are not uploaded here: call upload_asset first, then reference the file with \`img: <- filename\`. Call get_markup_reference before writing markup you are unsure of. Saving also registers the source's forms on the project.`,
       inputSchema: SavePageInput,
       outputSchema: SavePageOutput,
-      annotations: WRITE,
+      // Overwrites the active draft (or failed build) in place.
+      annotations: DESTRUCTIVE,
     },
     async (args) => {
       const result = await runSavePage(ctx, args);

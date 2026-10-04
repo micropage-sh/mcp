@@ -105,8 +105,8 @@ export async function getBuildById<T>(http: Http, projectId: number, buildId: nu
   return http.selectOne<T>("builds", { select: columns, filters: { id: eq(buildId), project_id: eq(projectId) } });
 }
 
-/** Same write as the CLI's setActiveBuildId. */
-export async function setActiveBuild(http: Http, projectId: number, buildId: number): Promise<void> {
+/** Same write as the CLI's setActiveBuildId. null only restores a project that had no active build. */
+export async function setActiveBuild(http: Http, projectId: number, buildId: number | null): Promise<void> {
   const rows = await http.patch("projects", { id: eq(projectId) }, { active_build_id: buildId });
   if (rows.length === 0) {
     throw new MicropageError("PROJECT_NOT_FOUND", "Could not update the project's active build (project not found or not yours).");

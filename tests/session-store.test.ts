@@ -1,7 +1,7 @@
 import { readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MicropageError } from "../src/client/errors.js";
 import { Http } from "../src/client/http.js";
@@ -17,6 +17,7 @@ beforeEach(async () => {
   cfg = await tempConfig();
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await cfg.cleanup();
 });
 
@@ -215,6 +216,66 @@ describe("SessionAuthProvider", () => {
 
     expect(await provider(createFakeFetch(refreshOk(next, "r2")).fetch).getAccessToken()).toBe(next);
     expect(await readdir(cfg.dir)).toEqual(["config.json"]);
+  });
+
+  it("keeps rotated tokens in memory when they cannot be written back, and logs that once", async () => {
+    await cfg.write({ access_token: tokenFor("user-1", 5), refresh_token: "r1", user: USER });
+    const before = await cfg.raw();
+    const second = tokenFor("user-1", 3600, Date.now(), "second");
+    const third = tokenFor("user-1", 3600, Date.now(), "third");
+    const fake = createFakeFetch(refreshOk(second, "r2"), refreshOk(third, "r3"));
+    const logs: string[] = [];
+    const auth = new SessionAuthProvider({ config: TEST_CONFIG, path: cfg.path, fetch: fake.fetch, lock: { retryMs: 5 }, log: (m) => logs.push(m) });
+    vi.spyOn(auth.store, "writeTokens").mockRejectedValue(Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" }));
+
+    expect(await auth.getAccessToken()).toBe(second);
+    // The file still holds the spent r1; the in-memory session stands in for it.
+    expect(await auth.getAccessToken()).toBe(second);
+    expect(await auth.hasSession()).toBe(true);
+    // A later refresh (after a 401) uses the rotated refresh token, not the spent one.
+    expect(await auth.getAccessToken({ forceRefresh: true })).toBe(third);
+    expect(fake.calls.map((c) => c.body)).toEqual([{ refresh_token: "r1" }, { refresh_token: "r2" }]);
+
+    expect(await cfg.raw()).toBe(before);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/could not save the refreshed login[\s\S]*EROFS[\s\S]*micropage login/);
+  });
+
+  it("drops the in-memory tokens once the CLI writes a new session", async () => {
+    await cfg.write({ access_token: tokenFor("user-1", 5), refresh_token: "r1" });
+    const mem = tokenFor("user-1", 3600, Date.now(), "mem");
+    const auth = new SessionAuthProvider({ config: TEST_CONFIG, path: cfg.path, fetch: createFakeFetch(refreshOk(mem, "r2")).fetch, log: () => undefined });
+    vi.spyOn(auth.store, "writeTokens").mockRejectedValueOnce(new Error("EACCES"));
+    expect(await auth.getAccessToken()).toBe(mem);
+
+    const relogin = tokenFor("user-1", 3600, Date.now(), "relogin");
+    await cfg.write({ access_token: relogin, refresh_token: "r9" });
+    expect(await auth.getAccessToken()).toBe(relogin);
+  });
+
+  it("does not write tokens back when the CLI logged out during the refresh", async () => {
+    await cfg.write({ access_token: tokenFor("user-1", 5), refresh_token: "r1", keep: 1 });
+    const fake = createFakeFetch(async () => {
+      // `micropage logout` while our refresh is in flight.
+      await cfg.write({ keep: 1 });
+      return { body: { access_token: tokenFor("user-1", 3600), refresh_token: "r2", user: USER } };
+    });
+    const err = (await provider(fake.fetch).getAccessToken().catch((e: unknown) => e)) as MicropageError;
+    expect(err).toBeInstanceOf(MicropageError);
+    expect(err.code).toBe("NOT_LOGGED_IN");
+    expect(err.message).toMatch(/logged out[\s\S]*micropage login/);
+    expect(await cfg.read()).toEqual({ keep: 1 });
+  });
+
+  it("does not recreate a session file deleted during the refresh", async () => {
+    await cfg.write({ access_token: tokenFor("user-1", 5), refresh_token: "r1" });
+    const { rm } = await import("node:fs/promises");
+    const fake = createFakeFetch(async () => {
+      await rm(cfg.path);
+      return { body: { access_token: tokenFor("user-1", 3600), refresh_token: "r2" } };
+    });
+    await expect(provider(fake.fetch).getAccessToken()).rejects.toMatchObject({ code: "NOT_LOGGED_IN" });
+    expect(await readdir(cfg.dir)).toEqual([]);
   });
 
   it("waits for a live lock and gives up with SESSION_LOCKED instead of refreshing concurrently", async () => {

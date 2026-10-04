@@ -78,16 +78,19 @@ export class SessionStore {
 
   async readSession(): Promise<StoredSession | null> {
     const config = await this.readConfig();
-    if (!config) return null;
-    const { access_token, refresh_token, user } = config;
-    if (typeof access_token !== "string" || !access_token) return null;
-    if (typeof refresh_token !== "string" || !refresh_token) return null;
-    return { access_token, refresh_token, user: user ?? null };
+    if (!config || !hasTokens(config)) return null;
+    return { access_token: config.access_token as string, refresh_token: config.refresh_token as string, user: config.user ?? null };
   }
 
-  /** Replaces the token keys (and user, when given), keeping every other key. */
-  async writeTokens(tokens: { access_token: string; refresh_token: string; user?: unknown }): Promise<void> {
-    const config = (await this.readConfig()) ?? {};
+  /**
+   * Replaces the token keys (and user, when given), keeping every other key.
+   * Re-reads the file first and writes nothing when it no longer holds a
+   * session: the user logged out while a refresh was in flight, and writing
+   * the tokens back would undo that. Returns whether it wrote.
+   */
+  async writeTokens(tokens: { access_token: string; refresh_token: string; user?: unknown }): Promise<boolean> {
+    const config = await this.readConfig();
+    if (!config || !hasTokens(config)) return false;
     config.access_token = tokens.access_token;
     config.refresh_token = tokens.refresh_token;
     if (tokens.user !== undefined && tokens.user !== null) config.user = tokens.user;
@@ -101,7 +104,13 @@ export class SessionStore {
       await unlink(tmp).catch(() => undefined);
       throw err;
     }
+    return true;
   }
+}
+
+function hasTokens(config: Record<string, unknown>): boolean {
+  const { access_token, refresh_token } = config;
+  return typeof access_token === "string" && access_token !== "" && typeof refresh_token === "string" && refresh_token !== "";
 }
 
 export interface SessionAuthOptions {
@@ -112,6 +121,19 @@ export interface SessionAuthOptions {
   now?: () => number;
   lock?: LockOptions;
   timeoutMs?: number;
+  /** Where the one-time "could not save the session" notice goes; stderr by default (stdout is the MCP stream). */
+  log?: (message: string) => void;
+}
+
+/**
+ * Tokens a refresh produced that could not be written to the file. Supabase
+ * has already spent the file's refresh token, so the file alone is a dead
+ * session; these stand in for it while the file still holds that spent
+ * token (fileRefreshToken), and are dropped once the file changes.
+ */
+interface MemorySession {
+  session: StoredSession;
+  fileRefreshToken: string;
 }
 
 interface TokenResponse {
@@ -137,6 +159,9 @@ export class SessionAuthProvider implements AuthProvider {
   private readonly timeoutMs: number;
   private inflight: Promise<string> | null = null;
   private lastIssued: string | null = null;
+  private memory: MemorySession | null = null;
+  private warnedWriteFailure = false;
+  private readonly log: (message: string) => void;
 
   constructor(options: SessionAuthOptions) {
     this.config = options.config;
@@ -145,6 +170,7 @@ export class SessionAuthProvider implements AuthProvider {
     this.now = options.now ?? Date.now;
     this.lockOptions = options.lock ?? {};
     this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.log = options.log ?? ((message) => process.stderr.write(`${message}\n`));
   }
 
   get path(): string {
@@ -152,7 +178,19 @@ export class SessionAuthProvider implements AuthProvider {
   }
 
   async hasSession(): Promise<boolean> {
-    return (await this.store.readSession()) !== null;
+    return (await this.currentSession()) !== null;
+  }
+
+  /** The file's session, or the in-memory one while the file still holds the refresh token it replaced. */
+  private async currentSession(): Promise<StoredSession | null> {
+    const file = await this.store.readSession();
+    const memory = this.memory;
+    if (memory) {
+      if (file && file.refresh_token === memory.fileRefreshToken) return memory.session;
+      // Logged in again, rotated by the CLI, or logged out: the file wins.
+      this.memory = null;
+    }
+    return file;
   }
 
   async getAccessToken(options: { forceRefresh?: boolean } = {}): Promise<string> {
@@ -177,7 +215,7 @@ export class SessionAuthProvider implements AuthProvider {
   }
 
   private async requireSession(): Promise<StoredSession> {
-    const session = await this.store.readSession();
+    const session = await this.currentSession();
     if (!session) {
       throw new MicropageError("NOT_LOGGED_IN", `Not logged in to micropage. ${LOGIN_HINT}`);
     }
@@ -195,7 +233,7 @@ export class SessionAuthProvider implements AuthProvider {
         try {
           return this.issue(await this.exchange(current));
         } catch (err) {
-          const again = await this.store.readSession().catch(() => null);
+          const again = await this.currentSession().catch(() => null);
           if (!again || again.refresh_token === current.refresh_token) throw finalError(err);
           if (again.access_token !== stale && !isJwtExpiring(again.access_token, this.now())) {
             return this.issue(again.access_token);
@@ -259,14 +297,37 @@ export class SessionAuthProvider implements AuthProvider {
       refresh_token: typeof data.refresh_token === "string" && data.refresh_token ? data.refresh_token : session.refresh_token,
       user: data.user ?? session.user,
     };
-    await this.store.writeTokens(next);
+    // While the memory session is in use the file still holds the refresh
+    // token it replaced; keep pointing at that one.
+    const fileRefreshToken = this.memory?.session === session ? this.memory.fileRefreshToken : session.refresh_token;
+    let written: boolean;
+    try {
+      written = await this.store.writeTokens(next);
+    } catch (err) {
+      this.memory = { session: next, fileRefreshToken };
+      if (!this.warnedWriteFailure) {
+        this.warnedWriteFailure = true;
+        this.log(
+          `micropage-mcp: could not save the refreshed login to ${this.store.path} (${err instanceof Error ? err.message : String(err)}). ` +
+            "This server keeps using it in memory, but the micropage CLI's session there is now spent and may need `micropage login`.",
+        );
+      }
+      return next.access_token;
+    }
+    if (!written) {
+      this.memory = null;
+      throw new MicropageError("NOT_LOGGED_IN", `The micropage CLI was logged out while the login was being refreshed. ${LOGIN_HINT}`);
+    }
+    this.memory = null;
     return next.access_token;
   }
 }
 
 /** Transport trouble stays retryable; anything else means the stored login is no good. */
 function finalError(err: unknown): MicropageError {
-  if (err instanceof MicropageError && (err.code === "NETWORK" || err.code === "AUTH_UNAVAILABLE")) return err;
+  if (err instanceof MicropageError && (err.code === "NETWORK" || err.code === "AUTH_UNAVAILABLE" || err.code === "NOT_LOGGED_IN")) {
+    return err;
+  }
   return new MicropageError("SESSION_EXPIRED", `The micropage login session has expired. ${LOGIN_HINT}`, {
     cause: err,
   });

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { readFile, stat } from "node:fs/promises";
+import { isIP } from "node:net";
 import { extname, isAbsolute } from "node:path";
 
 import { VERSION } from "../version.js";
@@ -90,12 +92,44 @@ function looksLike(ext: string, bytes: Uint8Array): boolean {
       return startsWith(bytes, ascii("RIFF")) && startsWith(bytes, ascii("WEBP"), 8);
     case ".ico":
       return startsWith(bytes, [0x00, 0x00, 0x01, 0x00]);
-    case ".svg": {
-      const text = Buffer.from(bytes).toString("utf8").replace(/^\uFEFF/, "").trimStart();
-      return text.startsWith("<") && /<svg[\s>]/i.test(text);
-    }
+    case ".svg":
+      return hasSvgRoot(Buffer.from(bytes).toString("utf8"));
     default:
       return false;
+  }
+}
+
+/**
+ * True when the document's root element is <svg>. Only an optional BOM,
+ * whitespace, one <?xml ...?> declaration, comments and a <!DOCTYPE svg ...>
+ * (without an internal subset) may come before it. Looking for "<svg"
+ * anywhere would pass an HTML page with an inline icon, or any file that
+ * merely mentions <svg> in a comment.
+ */
+export function hasSvgRoot(text: string): boolean {
+  let rest = text.replace(/^\uFEFF/, "");
+  let sawDecl = false;
+  let sawDoctype = false;
+  for (;;) {
+    rest = rest.trimStart();
+    if (/^<\?xml[\s?]/.test(rest) && !sawDecl) {
+      const end = rest.indexOf("?>");
+      if (end < 0) return false;
+      rest = rest.slice(end + 2);
+      sawDecl = true;
+    } else if (rest.startsWith("<!--")) {
+      const end = rest.indexOf("-->", 4);
+      if (end < 0) return false;
+      rest = rest.slice(end + 3);
+    } else if (/^<!DOCTYPE\s+svg[\s>]/.test(rest) && !sawDoctype) {
+      const end = rest.indexOf(">");
+      // An internal subset ([...]) can declare entities; no real SVG needs one.
+      if (end < 0 || rest.slice(0, end).includes("[")) return false;
+      rest = rest.slice(end + 1);
+      sawDoctype = true;
+    } else {
+      return /^<svg[\s>/]/.test(rest);
+    }
   }
 }
 
@@ -122,6 +156,8 @@ export type AssetSource = { path: string } | { url: string } | { base64: string 
 export interface LoadSourceOptions {
   /** Used for `{url}` sources only; never sent micropage credentials. */
   fetch?: FetchLike;
+  /** Resolves `{url}` hostnames before each fetch; defaults to urlHostLookup.current. */
+  lookup?: HostLookup;
   maxBytes?: number;
   timeoutMs?: number;
 }
@@ -138,7 +174,12 @@ export async function loadAssetSource(source: AssetSource, options: LoadSourceOp
   const maxBytes = options.maxBytes ?? MAX_ASSET_BYTES;
   if ("path" in source) return loadPath(source.path, maxBytes);
   if ("url" in source) {
-    return loadUrl(source.url, maxBytes, options.timeoutMs ?? URL_FETCH_TIMEOUT_MS, options.fetch ?? ((i, init) => fetch(i, init)));
+    return loadUrl(source.url, {
+      maxBytes,
+      timeoutMs: options.timeoutMs ?? URL_FETCH_TIMEOUT_MS,
+      fetchImpl: options.fetch ?? ((i, init) => fetch(i, init)),
+      lookup: options.lookup ?? urlHostLookup.current,
+    });
   }
   return loadBase64(source.base64, maxBytes);
 }
@@ -179,38 +220,177 @@ function loadBase64(raw: string, maxBytes: number): Buffer {
   return bytes;
 }
 
-async function loadUrl(raw: string, maxBytes: number, timeoutMs: number, fetchImpl: FetchLike): Promise<Buffer> {
+// ---------------------------------------------------------------------------
+// {url} sources: public https hosts only
+//
+// The server may run next to services that trust the local network (cloud
+// metadata at 169.254.169.254, a router admin page, localhost dev servers),
+// so a model-supplied URL must not reach them, directly or via a redirect.
+// The check runs on every hop. fetch resolves the name again, so a DNS answer
+// that changes in between is not caught; that needs a pinned-address agent.
+// ---------------------------------------------------------------------------
+
+export type HostLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string; family: number }>>;
+
+/** Swappable in tests so no real DNS query is made. */
+export const urlHostLookup: { current: HostLookup } = {
+  current: (hostname) => lookup(hostname, { all: true, verbatim: true }),
+};
+
+export const MAX_URL_REDIRECTS = 5;
+
+function ipv4Bytes(ip: string): number[] | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const bytes = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : Number.NaN));
+  return bytes.every((b) => b >= 0 && b <= 255) ? bytes : null;
+}
+
+/** 16 bytes of an IPv6 address (zone id dropped), or null when it does not parse. */
+function ipv6Bytes(raw: string): number[] | null {
+  let ip = raw.split("%")[0]!;
+  let tail: number[] = [];
+  const lastColon = ip.lastIndexOf(":");
+  if (ip.slice(lastColon + 1).includes(".")) {
+    const v4 = ipv4Bytes(ip.slice(lastColon + 1));
+    if (!v4) return null;
+    tail = v4;
+    ip = `${ip.slice(0, lastColon + 1)}0:0`;
+  }
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const groups = (h: string): string[] => (h === "" ? [] : h.split(":"));
+  const head = groups(halves[0]!);
+  const back = halves.length === 2 ? groups(halves[1]!) : [];
+  const fill = 8 - head.length - back.length;
+  if (halves.length === 1 ? fill !== 0 : fill < 1) return null;
+  const all = [...head, ...Array<string>(halves.length === 2 ? fill : 0).fill("0"), ...back];
+  const bytes: number[] = [];
+  for (const g of all) {
+    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
+    const n = parseInt(g, 16);
+    bytes.push(n >> 8, n & 0xff);
+  }
+  if (tail.length) bytes.splice(12, 4, ...tail);
+  return bytes;
+}
+
+function blockedV4([a, b]: number[]): boolean {
+  return (
+    a === 0 || // 0.0.0.0/8 "this network"
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b! >= 64 && b! <= 127) || // CGNAT 100.64/10
+    (a === 169 && b === 254) || // link-local, cloud metadata
+    (a === 172 && b! >= 16 && b! <= 31) ||
+    (a === 192 && b === 168) ||
+    a! >= 224 // multicast 224/4 and reserved 240/4, incl. broadcast
+  );
+}
+
+/** True for loopback, private, link-local, CGNAT, ULA, multicast and unspecified addresses, in any notation. */
+export function isPrivateAddress(ip: string): boolean {
+  const family = isIP(ip.split("%")[0]!);
+  if (family === 4) return blockedV4(ipv4Bytes(ip)!);
+  if (family !== 6) return true;
+  const b = ipv6Bytes(ip);
+  if (!b) return true;
+  const zeros = (n: number): boolean => b.slice(0, n).every((x) => x === 0);
+  // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible, which also covers :: and ::1).
+  if ((zeros(10) && b[10] === 0xff && b[11] === 0xff) || zeros(12)) return blockedV4(b.slice(12));
+  return (
+    (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) || // fe80::/10 link-local
+    (b[0]! & 0xfe) === 0xfc || // fc00::/7 unique local
+    b[0] === 0xff // ff00::/8 multicast
+  );
+}
+
+async function assertPublicHost(url: URL, lookupHost: HostLookup, redirected: boolean): Promise<void> {
+  if (url.protocol !== "https:") {
+    throw new MicropageError(
+      "INVALID_SOURCE",
+      redirected
+        ? `source.url redirected to a non-https URL (${url.toString()}). Nothing was uploaded.`
+        : `source.url must use https:// (got ${url.protocol}//). Nothing was fetched.`,
+    );
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const refuse = (address: string): MicropageError =>
+    new MicropageError(
+      "INVALID_SOURCE",
+      `source.url host ${url.hostname} is a private, local or reserved address (${address}). Only public https hosts are ` +
+        "fetched; upload a local file with source.path or source.base64 instead. Nothing was fetched.",
+    );
+  if (isIP(host)) {
+    if (isPrivateAddress(host)) throw refuse(host);
+    return;
+  }
+  let addresses: ReadonlyArray<{ address: string }>;
+  try {
+    addresses = await lookupHost(host);
+  } catch (err) {
+    throw new MicropageError("NETWORK", `Could not resolve ${host}: ${err instanceof Error ? err.message : String(err)}. Check the URL.`, {
+      cause: err,
+    });
+  }
+  if (addresses.length === 0) throw new MicropageError("NETWORK", `${host} has no addresses. Check the URL.`);
+  const bad = addresses.find((a) => isPrivateAddress(a.address));
+  if (bad) throw refuse(bad.address);
+}
+
+interface LoadUrlOptions {
+  maxBytes: number;
+  timeoutMs: number;
+  fetchImpl: FetchLike;
+  lookup: HostLookup;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, lookup: lookupHost }: LoadUrlOptions): Promise<Buffer> {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
     throw new MicropageError("INVALID_SOURCE", `source.url "${raw}" is not a valid URL.`);
   }
-  if (url.protocol !== "https:") {
-    throw new MicropageError("INVALID_SOURCE", `source.url must use https:// (got ${url.protocol}//). Nothing was fetched.`);
-  }
 
   const signal = AbortSignal.timeout(timeoutMs);
   let res: Response;
-  try {
-    res = await fetchImpl(url.toString(), {
-      method: "GET",
-      redirect: "follow",
-      signal,
-      headers: { "User-Agent": `micropage-mcp/${VERSION}`, Accept: "image/*" },
-    });
-  } catch (err) {
-    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-      throw new MicropageError("TIMEOUT", `Fetching ${url.host} timed out after ${Math.round(timeoutMs / 1000)}s.`, { cause: err });
+  for (let hop = 0; ; hop++) {
+    await assertPublicHost(url, lookupHost, hop > 0);
+    try {
+      res = await fetchImpl(url.toString(), {
+        method: "GET",
+        // Followed by hand so every hop gets the host check.
+        redirect: "manual",
+        signal,
+        headers: { "User-Agent": `micropage-mcp/${VERSION}`, Accept: "image/*" },
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new MicropageError("TIMEOUT", `Fetching ${url.host} timed out after ${Math.round(timeoutMs / 1000)}s.`, { cause: err });
+      }
+      throw new MicropageError("NETWORK", `Fetching ${url.toString()} failed: ${err instanceof Error ? err.message : String(err)}.`, {
+        cause: err,
+      });
     }
-    throw new MicropageError("NETWORK", `Fetching ${url.toString()} failed: ${err instanceof Error ? err.message : String(err)}.`, {
-      cause: err,
-    });
-  }
-  // A redirect to plain http would defeat the https-only rule.
-  if (res.url && !res.url.startsWith("https:")) {
+    if (!REDIRECT_STATUSES.has(res.status)) break;
     await res.body?.cancel().catch(() => undefined);
-    throw new MicropageError("INVALID_SOURCE", `source.url redirected to a non-https URL (${res.url}). Nothing was uploaded.`);
+    const location = res.headers.get("location");
+    if (!location) {
+      throw new MicropageError("HTTP", `Fetching ${url.toString()} returned a redirect (HTTP ${res.status}) without a Location.`, {
+        status: res.status,
+      });
+    }
+    if (hop >= MAX_URL_REDIRECTS) {
+      throw new MicropageError("INVALID_SOURCE", `source.url redirected more than ${MAX_URL_REDIRECTS} times. Pass the final image URL.`);
+    }
+    try {
+      url = new URL(location, url);
+    } catch {
+      throw new MicropageError("INVALID_SOURCE", `source.url redirected to an invalid URL (${location}). Nothing was uploaded.`);
+    }
   }
   if (!res.ok) {
     await res.body?.cancel().catch(() => undefined);

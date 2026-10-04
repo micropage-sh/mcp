@@ -66,6 +66,14 @@ export class Http {
   }
 
   async request<T = unknown>(method: string, url: string, options: RequestOptions = {}): Promise<T> {
+    const res = await this.exchange(method, url, options);
+    const data = await readBody(res);
+    if (!res.ok) throw httpError(method, url, res, data);
+    return data as T;
+  }
+
+  /** The response after auth and the one 401 retry; the caller reads (or cancels) the body. */
+  private async exchange(method: string, url: string, options: RequestOptions): Promise<Response> {
     const useAuth = options.auth !== false;
     let token = useAuth ? await this.auth.getAccessToken() : this.config.supabaseAnonKey;
     let res = await this.send(method, url, token, options);
@@ -78,10 +86,29 @@ export class Http {
         res = await this.send(method, url, token, options);
       }
     }
+    return res;
+  }
 
+  /**
+   * Exact row count from PostgREST's Content-Range (a HEAD with
+   * Prefer: count=exact). Selecting rows to count them would stop at the
+   * server's max_rows cap and undercount silently.
+   */
+  async count(table: string, filters: Filters = {}): Promise<number> {
+    const params = new URLSearchParams();
+    params.set("select", "*");
+    appendFilters(params, filters);
+    const url = this.restUrl(table, params);
+    const res = await this.exchange("HEAD", url, { headers: { Prefer: "count=exact" } });
     const data = await readBody(res);
-    if (!res.ok) throw httpError(method, url, res, data);
-    return data as T;
+    if (!res.ok) throw httpError("HEAD", url, res, data);
+    const total = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "")?.[1];
+    if (total === undefined) {
+      throw new MicropageError("HTTP", `HEAD ${new URL(url).pathname} returned no row count (Content-Range). Retry shortly.`, {
+        status: res.status,
+      });
+    }
+    return Number(total);
   }
 
   async select<T = unknown>(table: string, options: SelectOptions = {}): Promise<T[]> {

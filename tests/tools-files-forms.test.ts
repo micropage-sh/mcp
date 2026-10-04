@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RO, WRITE } from "../src/annotations.js";
+import { urlHostLookup } from "../src/client/assets.js";
 import { createDeps, createServer } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
@@ -26,8 +27,11 @@ beforeEach(async () => {
   cfg = await tempConfig();
   await cfg.write({ access_token: tokenFor("user-1", 3600), refresh_token: "r1", user: { id: "user-1" } });
 });
+const realLookup = urlHostLookup.current;
+
 afterEach(async () => {
   vi.unstubAllGlobals();
+  urlHostLookup.current = realLookup;
   await client?.close();
   client = undefined;
   await cfg.cleanup();
@@ -60,7 +64,7 @@ function routed(fake: FakeFetch, handlers: Record<string, Handler>, count = 20):
     const handler = handlers[new URL(call.url).pathname];
     if (!handler) throw new Error(`unexpected ${call.method} ${call.url}`);
     const out = handler(call);
-    return out instanceof Reply ? { status: out.status, body: out.body } : { body: out };
+    return out instanceof Reply ? { status: out.status, body: out.body, headers: out.headers } : { body: out };
   };
   for (let i = 0; i < count; i++) fake.push(responder);
 }
@@ -69,8 +73,12 @@ class Reply {
   constructor(
     readonly status: number,
     readonly body: unknown,
+    readonly headers: Record<string, string> = {},
   ) {}
 }
+
+/** PostgREST's answer to a HEAD with Prefer: count=exact. */
+const countReply = (n: number) => new Reply(200, undefined, { "content-range": n === 0 ? "*/0" : `0-${n - 1}/${n}` });
 
 const base: Record<string, Handler> = {
   "/rest/v1/customers": () => [{ plan_tier: "pro" }],
@@ -190,6 +198,11 @@ describe("upload_asset", () => {
       return new Response(PNG, { headers: { "content-type": "image/png" } });
     });
     vi.stubGlobal("fetch", external);
+    const resolved: string[] = [];
+    urlHostLookup.current = async (host) => {
+      resolved.push(host);
+      return [{ address: "93.184.216.34", family: 4 }];
+    };
     const fake = createFakeFetch();
     routed(fake, {
       ...base,
@@ -204,6 +217,7 @@ describe("upload_asset", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(external).toHaveBeenCalledTimes(1);
+    expect(resolved).toEqual(["img.example.com"]);
     expect(res.structuredContent).toMatchObject({ file_id: "f9", content_hash: sha(PNG) });
   });
 
@@ -330,9 +344,12 @@ describe("list_forms", () => {
       },
       "/rest/v1/form_submissions": (call) => {
         const q = new URL(call.url).searchParams;
+        expect(call.method).toBe("HEAD");
+        expect(call.headers.prefer).toBe("count=exact");
         expect(q.get("flagged_at")).toBe("is.null");
         expect(q.get("project_id")).toBe("eq.7");
-        return [{ form_id: FORM_ID }, { form_id: FORM_ID }, { form_id: null }];
+        // More than PostgREST's default max_rows of 1000: a row select would undercount.
+        return countReply(q.get("form_id") === `eq.${FORM_ID}` ? 2500 : 0);
       },
     });
     const c = await connect(fake);
@@ -341,7 +358,7 @@ describe("list_forms", () => {
     expect(res.structuredContent).toMatchObject({
       count: 2,
       forms: [
-        { id: FORM_ID, label: "Contact", form_ordinal: 0, submission_count: 2 },
+        { id: FORM_ID, label: "Contact", form_ordinal: 0, submission_count: 2500 },
         { id: "f-2", label: "Contact (2)", form_ordinal: 1, submission_count: 0 },
       ],
     });
@@ -359,7 +376,7 @@ describe("list_forms", () => {
         expect(q.get("order")).toBe("created_at.asc");
         return [form];
       },
-      "/rest/v1/form_submissions": () => [{ form_id: FORM_ID }],
+      "/rest/v1/form_submissions": () => countReply(1),
     });
     const c = await connect(fake);
     const res = await c.callTool({ name: "list_forms", arguments: { project: "acme" } });

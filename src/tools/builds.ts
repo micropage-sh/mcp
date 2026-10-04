@@ -5,6 +5,7 @@ import { OUT, RO } from "../annotations.js";
 import {
   BUILD_ROW_COLUMNS,
   BuildRefInput,
+  IN_PROGRESS_STATUSES,
   findBuild,
   findPublishingBuild,
   getBuildById,
@@ -14,6 +15,7 @@ import {
   type BuildRow,
 } from "../client/builds.js";
 import {
+  getLatestDeployEventAt,
   getMaxDeployEventId,
   pollDeployStatus,
   realClock,
@@ -104,6 +106,34 @@ function etaFor(tier: PlanTier | null): { eta_seconds: number; eta: string } {
   };
 }
 
+/**
+ * Puts the previous active build back after a publish that did not start, so
+ * a failed publish_build leaves the project as it found it. Best effort: the
+ * returned error says whether the restore worked.
+ */
+async function restoreActiveBuild(ctx: ToolContext, project: Project, cause: unknown): Promise<MicropageError> {
+  const previous = project.active_build_id;
+  const base = cause instanceof MicropageError ? cause : null;
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  let note: string;
+  try {
+    await setActiveBuild(ctx.http, project.id, previous);
+    note =
+      previous === null
+        ? "The project's active build was reset to none, as before. Nothing was published."
+        : `The project's active build was restored to id ${previous}, as before. Nothing was published.`;
+  } catch {
+    note =
+      `Restoring the previous active build (id ${previous ?? "none"}) also failed, so the build named here is still ` +
+      "the active build. Call list_builds to check, and publish_build again or pick the build to keep.";
+  }
+  return new MicropageError(base?.code ?? "PUBLISH_FAILED", `Starting the publish failed: ${reason} ${note}`, {
+    ...(base?.status === undefined ? {} : { status: base.status }),
+    data: base?.data,
+    cause,
+  });
+}
+
 export async function runPublishBuild(
   ctx: ToolContext,
   args: z.infer<typeof PublishBuildInput>,
@@ -129,8 +159,14 @@ export async function runPublishBuild(
   const activeChanged = target.id !== project.active_build_id;
   if (activeChanged) await setActiveBuild(ctx.http, project.id, target.id);
 
-  const afterEventId = await getMaxDeployEventId(ctx.http, target.id);
-  await invokePublishBuild(ctx.http, project.id, target.id);
+  let afterEventId: number;
+  try {
+    afterEventId = await getMaxDeployEventId(ctx.http, target.id);
+    await invokePublishBuild(ctx.http, project.id, target.id);
+  } catch (err) {
+    if (!activeChanged) throw err;
+    throw await restoreActiveBuild(ctx, project, err);
+  }
 
   let tier: PlanTier | null = null;
   try {
@@ -159,7 +195,8 @@ export async function runPublishBuild(
 // get_deploy_status
 // ---------------------------------------------------------------------------
 
-export const MAX_WAIT_SECONDS = 60;
+/** Kept well under the 60 s request timeout most MCP clients apply. */
+export const MAX_WAIT_SECONDS = 45;
 export const DEFAULT_WAIT_SECONDS = 20;
 export const MAX_RETURNED_EVENTS = 100;
 
@@ -207,12 +244,49 @@ export const GetDeployStatusOutput = z.object({
   events: z.array(DeployEventOut).describe("New events since after_event_id, oldest first."),
   events_truncated: z.boolean().describe("True when older events were left out to keep the reply short."),
   after_event_id: z.number().describe("Cursor for the next call."),
-  done: z.boolean().describe("True when the publish finished (deployed or failed) or the build is not publishing."),
+  done: z
+    .boolean()
+    .describe(
+      "True when the publish finished (deployed or failed). With after_event_id only a deploy event after it counts; " +
+        "without, true also when the build is simply not publishing.",
+    ),
   succeeded: z.boolean().nullable().describe("True when deployed, false when failed, null while still running."),
+  waiting_for_start: z
+    .boolean()
+    .describe(
+      "True when after_event_id was given but the deploy has not started yet: a site rebuild after a post change is " +
+        "queued (up to about 3 minutes unless the account is Pro+) and only then shows events.",
+    ),
+  possibly_stuck: z
+    .boolean()
+    .describe("True when the build has been publishing with no deploy events for much longer than a deploy takes."),
   live_url: z.string().nullable(),
   next: z.string(),
 });
 export type GetDeployStatusResult = z.infer<typeof GetDeployStatusOutput>;
+
+/** Grace on top of the queue delay before a silent publish is called possibly stuck. */
+export const STUCK_GRACE_MS = 5 * 60 * 1000;
+const QUEUE_DELAY_MS = 3 * 60 * 1000;
+
+/**
+ * A build sitting in publishing with no deploy event for longer than the
+ * queue delay plus STUCK_GRACE_MS: most likely the publisher webhook never
+ * arrived, which nothing on the server retries.
+ */
+async function looksStuck(ctx: ToolContext, build: { id: number; updated_at: string | null }, nowMs: number): Promise<boolean> {
+  let tier: PlanTier | null = null;
+  try {
+    tier = await ctx.tier.getPlanTier();
+  } catch {
+    // Unknown plan: assume the queue delay applies.
+  }
+  const threshold = (tier === "pro_plus" ? 0 : QUEUE_DELAY_MS) + STUCK_GRACE_MS;
+  const lastEventAt = await getLatestDeployEventAt(ctx.http, build.id).catch(() => null);
+  const times = [build.updated_at, lastEventAt].map((t) => (t ? Date.parse(t) : Number.NaN)).filter((t) => !Number.isNaN(t));
+  if (times.length === 0) return false;
+  return nowMs - Math.max(...times) > threshold;
+}
 
 export async function runGetDeployStatus(
   ctx: ToolContext,
@@ -223,7 +297,7 @@ export async function runGetDeployStatus(
   await gateTool(ctx, "get_deploy_status");
   const project = await resolveProject(ctx, args.project);
   const target = await resolveTargetBuild(ctx, project, args.build);
-  const waitSeconds = args.wait_seconds ?? DEFAULT_WAIT_SECONDS;
+  const waitSeconds = Math.min(args.wait_seconds ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
   const cursorGiven = args.after_event_id !== undefined;
 
   const poll = await pollDeployStatus({
@@ -251,21 +325,37 @@ export async function runGetDeployStatus(
 
   const events: DeployEvent[] = poll.events.slice(-MAX_RETURNED_EVENTS);
   const b = poll.build;
+  const terminalType = poll.terminal_event?.type;
   const succeeded = !poll.done
     ? null
-    : poll.terminal_event?.type === "build.failed" || b.status === "failed"
+    : terminalType === "build.failed" || (!terminalType && b.status === "failed")
       ? false
-      : b.status === "deployed" || poll.terminal_event?.type === "deployment.completed"
+      : terminalType === "deployment.completed" || b.status === "deployed"
         ? true
         : null;
 
+  const inProgress = IN_PROGRESS_STATUSES.has(b.status ?? "");
+  const possiblyStuck = !poll.done && inProgress && (await looksStuck(ctx, b, Date.now()));
+  const again = `Call get_deploy_status again with build "id:${b.id}" and after_event_id ${poll.after_event_id}.`;
+
   let next: string;
-  if (!poll.done) {
-    next = `Still publishing. Call get_deploy_status again with build "id:${b.id}" and after_event_id ${poll.after_event_id}.`;
+  if (poll.waiting_for_start) {
+    next =
+      `Waiting for the rebuild to start: build v${b.number ?? "?"} is ${b.status ?? "in an unknown state"} and no deploy ` +
+      "event has arrived since after_event_id. Site rebuilds are queued for up to about 3 minutes unless the account is " +
+      `Pro+, so this is expected at first. Nothing is live from this change yet. ${again}`;
+  } else if (!poll.done) {
+    next = possiblyStuck
+      ? `Build v${b.number ?? "?"} has been publishing with no deploy events for much longer than a deploy takes, so it is ` +
+        "possibly stuck (the publisher webhook may have failed). Tell the user and retry with publish_build; it accepts " +
+        `the retry once the build has been publishing for 30 minutes. Until then, ${again[0]!.toLowerCase()}${again.slice(1)}`
+      : `Still publishing. ${again}`;
   } else if (succeeded === true) {
     next = `Deployed${project.live_url ? ` to ${project.live_url}` : ""}. ${DEPLOY_GOTCHAS}`;
   } else if (succeeded === false) {
     next = `The publish failed${b.failure_reason ? `: ${b.failure_reason}` : ""}. Fix the source with save_page, then publish again.`;
+  } else if (cursorGiven) {
+    next = `Build v${b.number ?? "?"} is ${b.status ?? "in an unknown state"}; the publish ended without a deploy event. Call list_builds or get_project to check what is live.`;
   } else {
     next = `Build v${b.number ?? "?"} is ${b.status ?? "in an unknown state"}, not publishing. Call publish_build to publish it.`;
   }
@@ -284,6 +374,8 @@ export async function runGetDeployStatus(
     after_event_id: poll.after_event_id,
     done: poll.done,
     succeeded,
+    waiting_for_start: poll.waiting_for_start,
+    possibly_stuck: possiblyStuck,
     live_url: project.live_url,
     next,
   };
@@ -370,7 +462,7 @@ It returns at once with status publishing, after_event_id and an ETA (builds wai
       title: "Follow a micropage deploy",
       description: `Report the progress of a publish: the build status, the deploy events since after_event_id (queued, built, uploaded, domain wiring, completed or failed), whether it is done, and the live URL.
 
-Call it after publish_build, passing the build and after_event_id it returned, and keep calling it with the returned after_event_id until done is true. It waits up to wait_seconds (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}) for the deploy to finish, sending progress notifications meanwhile.
+Call it after publish_build or publish_post, passing the build and after_event_id they returned, and keep calling it with the returned after_event_id until done is true. With after_event_id, only a deploy event after it ends the wait: a site rebuild after a post change is queued (up to about 3 minutes unless the account is Pro+) and reports waiting_for_start until it begins. It waits up to wait_seconds (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}) per call, sending progress notifications meanwhile. possibly_stuck flags a publish with no events for far longer than a deploy takes.
 
 When it reports success: ${DEPLOY_GOTCHAS} Read-only; it never starts or cancels a deploy.`,
       inputSchema: GetDeployStatusInput,
@@ -379,7 +471,13 @@ When it reports success: ${DEPLOY_GOTCHAS} Read-only; it never starts or cancels
     },
     async (args, handlerCtx) => {
       const result = await runGetDeployStatus(ctx, args, handlerCtx);
-      const state = !result.done ? "still publishing" : result.succeeded === true ? "deployed" : result.succeeded === false ? "failed" : result.build.status ?? "idle";
+      const state = result.waiting_for_start
+        ? "waiting for the rebuild to start"
+        : result.possibly_stuck
+          ? "publishing, possibly stuck"
+          : !result.done
+            ? "still publishing"
+            : result.succeeded === true ? "deployed" : result.succeeded === false ? "failed" : result.build.status ?? "idle";
       return structuredResult(result, `Build v${result.build.number ?? "?"}: ${state}.`);
     },
   );

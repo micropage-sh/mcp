@@ -149,3 +149,39 @@ describe("Http PostgREST helpers", () => {
     expect(url.searchParams.get("filename")).toBe("a b.png");
   });
 });
+
+describe("Http.count", () => {
+  it("sends HEAD with Prefer: count=exact and reads the total from Content-Range", async () => {
+    const fake = createFakeFetch({ headers: { "content-range": "0-999/3573" } });
+    const n = await makeHttp(fake).count("newsletter_subscribers", { form_id: eq("f1"), unsubscribed_at: "is.null" });
+    expect(n).toBe(3573);
+    const [call] = fake.calls;
+    expect(call?.method).toBe("HEAD");
+    expect(call?.headers.prefer).toBe("count=exact");
+    expect(call?.headers.authorization).toBe("Bearer token-1");
+    const q = new URL(call!.url).searchParams;
+    expect(q.get("form_id")).toBe("eq.f1");
+    expect(q.get("unsubscribed_at")).toBe("is.null");
+  });
+
+  it("reads an empty result's */0", async () => {
+    expect(await makeHttp(createFakeFetch({ headers: { "content-range": "*/0" } })).count("forms")).toBe(0);
+  });
+
+  it("retries once after a 401 like every other request", async () => {
+    const fake = createFakeFetch({ status: 401 }, { headers: { "content-range": "*/7" } });
+    expect(await makeHttp(fake, new FakeAuth(["old", "new"])).count("forms")).toBe(7);
+    expect(fake.calls.map((c) => c.headers.authorization)).toEqual(["Bearer old", "Bearer new"]);
+  });
+
+  it("fails loudly without a Content-Range rather than guessing", async () => {
+    const err = await makeHttp(createFakeFetch({ body: [] })).count("forms").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MicropageError);
+    expect((err as MicropageError).message).toMatch(/no row count/);
+  });
+
+  it("reports HTTP errors", async () => {
+    const err = await makeHttp(createFakeFetch({ status: 500, body: { message: "boom" } })).count("forms").catch((e: unknown) => e);
+    expect((err as MicropageError).status).toBe(500);
+  });
+});

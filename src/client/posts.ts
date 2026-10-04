@@ -122,39 +122,13 @@ export async function formNamesById(http: Http, ids: ReadonlyArray<string>): Pro
   return new Map(rows.map((r) => [r.id, r.form_name]));
 }
 
-/** Page size for the keyset scan; also Supabase's default max_rows. */
-const SUBSCRIBER_PAGE = 1000;
-const SUBSCRIBER_MAX_PAGES = 100;
-
 /**
  * Active subscribers on a list, with the filter publish-post sends to
  * (form_id, unsubscribed_at is null). The owner can read the table under RLS
- * ("Users can select newsletter_subscribers for own projects"). PostgREST
- * caps each response at the server's max_rows, so this pages by id until an
- * empty page instead of trusting a short page to mean the end.
+ * ("Users can select newsletter_subscribers for own projects").
  */
 export async function countActiveSubscribers(http: Http, formId: string): Promise<number> {
-  let total = 0;
-  let after: string | null = null;
-  for (let page = 0; page < SUBSCRIBER_MAX_PAGES; page++) {
-    const rows: Array<{ id: string }> = await http.select<{ id: string }>("newsletter_subscribers", {
-      select: "id",
-      filters: {
-        form_id: eq(formId),
-        unsubscribed_at: is("null"),
-        ...(after === null ? {} : { id: gt(after) }),
-      },
-      order: "id.asc",
-      limit: SUBSCRIBER_PAGE,
-    });
-    if (rows.length === 0) return total;
-    total += rows.length;
-    after = rows[rows.length - 1]!.id;
-  }
-  throw new MicropageError(
-    "COUNT_TOO_LARGE",
-    `The list has more than ${SUBSCRIBER_PAGE * SUBSCRIBER_MAX_PAGES} active subscribers; stopped counting.`,
-  );
+  return http.count("newsletter_subscribers", { form_id: eq(formId), unsubscribed_at: is("null") });
 }
 
 // ---------------------------------------------------------------------------

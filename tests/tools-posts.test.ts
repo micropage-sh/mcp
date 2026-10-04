@@ -102,13 +102,11 @@ function serve(b: Backend): FakeFetch {
         const ids = q.get("id")?.match(/^in\.\((.*)\)$/)?.[1]?.split(",");
         return { body: ids ? b.forms.filter((f) => ids.includes(f.id)) : b.forms.filter((f) => f.is_newsletter) };
       }
-      case "/rest/v1/newsletter_subscribers": {
-        // One page of ids, then an empty page once the cursor is set.
-        if (q.get("id")) return { body: [] };
-        return { body: Array.from({ length: b.subscribers }, (_, i) => ({ id: `sub-${String(i).padStart(4, "0")}` })) };
-      }
+      case "/rest/v1/newsletter_subscribers":
+        // An exact count: HEAD with Prefer: count=exact, read from Content-Range.
+        return { headers: { "content-range": `*/${b.subscribers}` } };
       case "/rest/v1/builds":
-        return { body: [{ status: b.activeBuildStatus }] };
+        return { body: [{ number: 6, status: b.activeBuildStatus }] };
       case "/rest/v1/build_deploy_events":
         return { body: [{ id: 77 }] };
       case "/functions/v1/list-files":
@@ -360,11 +358,12 @@ describe("preview_post_send + publish_post", () => {
       blocked_reason: expect.stringMatching(/MICROPAGE_MCP_ALLOW_SEND=1/),
     });
     const subs = fake.calls.filter((call) => call.url.includes("/rest/v1/newsletter_subscribers"));
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.method).toBe("HEAD");
+    expect(subs[0]!.headers.prefer).toBe("count=exact");
     const q = new URL(subs[0]!.url).searchParams;
     expect(q.get("form_id")).toBe(`eq.${FORM_ID}`);
     expect(q.get("unsubscribed_at")).toBe("is.null");
-    // Keyset paging: the second page continues after the last id seen.
-    expect(new URL(subs[1]!.url).searchParams.get("id")).toBe("gt.sub-0041");
     expect(mutatingCalls(fake)).toHaveLength(0);
   });
 
@@ -502,6 +501,119 @@ describe("unpublish_post / delete_post", () => {
       expect(res.structuredContent).toMatchObject({ slug: "hello", rebuild_queued: true });
     });
   }
+});
+
+describe("site rebuild with an unpublished page draft as the active build (TASK-54)", () => {
+  for (const status of ["draft", "failed"]) {
+    it(`upsert_post on a published post is refused while the active build is ${status}, then saves with allow_draft_deploy`, async () => {
+      const b = backend({
+        activeBuildStatus: status,
+        posts: [post({ published_at: "2026-10-01T00:00:00Z" })],
+        upsert: () => ({ body: { post_id: "post-1", action: "updated", published: true } }),
+      });
+      const fake = serve(b);
+      const c = await connect(fake);
+      const args = { project: "acme", title: "Hello", body_markdown: "New", confirm_live_update: true };
+
+      const refused = await c.callTool({ name: "upsert_post", arguments: args });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).toMatch(new RegExp(`unpublished page draft \\(build v6, status ${status}\\)[\\s\\S]*publish_build[\\s\\S]*allow_draft_deploy: true[\\s\\S]*Nothing was changed`));
+      expect(mutatingCalls(fake)).toHaveLength(0);
+
+      const ok = await c.callTool({ name: "upsert_post", arguments: { ...args, allow_draft_deploy: true } });
+      expect(ok.isError, text(ok)).toBeFalsy();
+      expect(ok.structuredContent).toMatchObject({ warnings: [expect.stringMatching(/build v6[\s\S]*goes live with this site rebuild/)] });
+      expect(mutatingCalls(fake)).toHaveLength(1);
+    });
+  }
+
+  it("upsert_post on a draft post is not affected (no rebuild)", async () => {
+    const fake = serve(backend({ activeBuildStatus: "draft" }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(fake.calls.some((call) => call.url.includes("/rest/v1/builds"))).toBe(false);
+  });
+
+  it("publish_post is refused before any publish call, then goes ahead with allow_draft_deploy", async () => {
+    const b = backend({ activeBuildStatus: "draft", posts: [post()] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token, site_warning } = preview.structuredContent as { confirmation_token: string; site_warning: string };
+    expect(site_warning).toMatch(/build v6, status draft[\s\S]*allow_draft_deploy/);
+
+    const refused = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/Publishing \\"hello\\" rebuilds the site[\s\S]*build v6/);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+
+    const ok = await c.callTool({
+      name: "publish_post",
+      arguments: { project: "acme", slug: "hello", confirmation_token, allow_draft_deploy: true },
+    });
+    expect(ok.isError, text(ok)).toBeFalsy();
+    expect(ok.structuredContent).toMatchObject({ rebuild_queued: true, note: expect.stringMatching(/goes live with this site rebuild/) });
+    expect(callsTo(fake, "publish-post")).toHaveLength(1);
+  });
+
+  it("publish_post of a visibility none post needs no acknowledgement", async () => {
+    const b = backend({ activeBuildStatus: "draft", posts: [post({ web_visibility: "none" })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+  });
+
+  for (const [tool, fn, verb] of [
+    ["unpublish_post", "unpublish-post", "Unpublishing"],
+    ["delete_post", "delete-post", "Deleting"],
+  ] as const) {
+    it(`${tool} is refused while the active build is a draft, then goes ahead with allow_draft_deploy`, async () => {
+      const b = backend({ activeBuildStatus: "draft", posts: [post({ published_at: "2026-10-01T00:00:00Z" })] });
+      const fake = serve(b);
+      const c = await connect(fake);
+      const refused = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).toMatch(new RegExp(`${verb} \\\\"hello\\\\" rebuilds the site[\\s\\S]*build v6`));
+      expect(callsTo(fake, fn)).toHaveLength(0);
+
+      const ok = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true, allow_draft_deploy: true } });
+      expect(ok.isError, text(ok)).toBeFalsy();
+      expect(ok.structuredContent).toMatchObject({ rebuild_queued: true, site_warning: expect.stringMatching(/build v6/) });
+      expect(callsTo(fake, fn)).toHaveLength(1);
+    });
+
+    it(`${tool} needs no acknowledgement when the active build is deployed`, async () => {
+      const fake = serve(backend({ posts: [post()] }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(res.structuredContent).toMatchObject({ site_warning: null });
+    });
+  }
+
+  it("delete_post of a slug that does not exist is not blocked (nothing is rebuilt)", async () => {
+    const fake = serve(backend({ activeBuildStatus: "draft" }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "delete_post", arguments: { project: "acme", slug: "ghost", confirm: true } });
+    expect(res.isError, text(res)).toBeFalsy();
+  });
+});
+
+describe("publish_post note", () => {
+  it("tells the model the rebuild is queued and how get_deploy_status will report it", async () => {
+    const fake = serve(backend({ posts: [post()] }));
+    const c = await connect(fake);
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect((res.structuredContent as { note: string }).note).toMatch(
+      /3 minutes[\s\S]*Pro\+[\s\S]*build "id:30", after_event_id 77[\s\S]*waiting_for_start[\s\S]*done only once/,
+    );
+  });
 });
 
 describe("fingerprint", () => {

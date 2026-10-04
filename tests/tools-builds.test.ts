@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUT, RO, WRITE } from "../src/annotations.js";
+import { DESTRUCTIVE, OUT, RO, WRITE } from "../src/annotations.js";
 import type { Clock } from "../src/client/deploy-events.js";
 import { createDeps, createServer } from "../src/server.js";
 import { buildToolsClock } from "../src/tools/builds.js";
@@ -66,6 +66,11 @@ interface Backend {
   statusPolls: number;
   parse: (call: RecordedCall) => { status?: number; body: unknown };
   deleteStatus?: number;
+  /** HTTP status publish-build answers with instead of success. */
+  publishStatus?: number;
+  /** HTTP status a PATCH of projects answers with after the first one. */
+  restoreStatus?: number;
+  projectPatches: number;
 }
 
 function build(overrides: Partial<BuildState> & { id: number; number: number }): BuildState {
@@ -88,6 +93,7 @@ function backend(overrides: Partial<Backend> = {}): Backend {
     builds: [build({ id: 30, number: 4 })],
     events: [],
     statusPolls: 0,
+    projectPatches: 0,
     parse: () => ({ body: { site: { title: "New" }, pages: [{ meta: {}, body: [] }] } }),
     ...overrides,
   };
@@ -127,6 +133,8 @@ function serve(b: Backend): FakeFetch {
           ],
         };
       case "PATCH /rest/v1/projects": {
+        b.projectPatches++;
+        if (b.projectPatches > 1 && b.restoreStatus) return { status: b.restoreStatus, body: { message: "nope" } };
         b.activeBuildId = (call.body as { active_build_id: number }).active_build_id;
         return { body: [{ id: 7, active_build_id: b.activeBuildId }] };
       }
@@ -162,12 +170,17 @@ function serve(b: Backend): FakeFetch {
       case "GET /rest/v1/build_deploy_events": {
         const buildId = Number(unq(q.get("build_id")));
         let rows = b.events.filter((e) => e.build_id === buildId);
+        if (q.get("select") === "created_at") {
+          rows.sort((x, y) => y.id - x.id);
+          return { body: rows.slice(0, 1).map((e) => ({ created_at: e.created_at })) };
+        }
         const after = q.get("id");
         if (after) rows = rows.filter((e) => e.id > Number(unq(after)));
         rows.sort((x, y) => (q.get("order") === "id.desc" ? y.id - x.id : x.id - y.id));
         return { body: rows.slice(0, Number(q.get("limit") ?? 1000)) };
       }
       case "POST /functions/v1/publish-build": {
+        if (b.publishStatus) return { status: b.publishStatus, body: { error: "publisher webhook failed" } };
         const { buildId } = call.body as { buildId: number };
         const target = b.builds.find((x) => x.id === buildId);
         if (target) target.status = "publishing";
@@ -251,7 +264,7 @@ describe("registration", () => {
     expect(byName.get("list_builds")!.annotations).toMatchObject(RO);
     expect(byName.get("get_deploy_status")!.annotations).toMatchObject(RO);
     expect(byName.get("create_project")!.annotations).toMatchObject(WRITE);
-    expect(byName.get("save_page")!.annotations).toMatchObject(WRITE);
+    expect(byName.get("save_page")!.annotations).toEqual(DESTRUCTIVE);
     expect(byName.get("publish_build")!.annotations).toMatchObject(OUT);
 
     for (const name of UNIT_B_TOOLS) {
@@ -321,7 +334,7 @@ describe("save_page", () => {
       action: "updated_draft",
       live: false,
       preview_url: "https://app.micropage.sh/editor/7",
-      next: expect.stringMatching(/never goes live.*publish_build/),
+      next: expect.stringMatching(/does not go live by itself.*allow_draft_deploy.*publish_build/),
     });
   });
 
@@ -602,10 +615,11 @@ describe("get_deploy_status", () => {
   it("times out with done false and a cursor to resume from", async () => {
     const clock = fakeClock();
     buildToolsClock.current = clock;
+    const now = new Date().toISOString();
     const b = backend({
       activeBuildId: 31,
-      builds: [build({ id: 31, number: 5, status: "publishing" })],
-      events: [{ id: 42, build_id: 31, event_type: "build.enqueued", payload: null, created_at: "t" }],
+      builds: [build({ id: 31, number: 5, status: "publishing", updated_at: now })],
+      events: [{ id: 42, build_id: 31, event_type: "build.enqueued", payload: null, created_at: now }],
     });
     const c = await connect(serve(b));
     const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 41, wait_seconds: 5 } });
@@ -616,8 +630,9 @@ describe("get_deploy_status", () => {
       events: [{ id: 42 }],
       next: expect.stringMatching(/after_event_id 42/),
     });
-    expect(clock.sleeps).toEqual([2000, 2000, 1000]);
-    expect(b.statusPolls).toBe(4);
+    expect(clock.sleeps).toEqual([2000, 2000]);
+    expect(b.statusPolls).toBe(3);
+    expect(res.structuredContent).toMatchObject({ waiting_for_start: false, possibly_stuck: false });
   });
 
   it("without a cursor, an old deployment.completed does not end a running publish", async () => {
@@ -638,6 +653,163 @@ describe("get_deploy_status", () => {
     const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID } });
     expect(res.structuredContent).toMatchObject({ done: true, succeeded: null, next: expect.stringMatching(/publish_build/) });
     expect(b.statusPolls).toBe(1);
+  });
+});
+
+describe("get_deploy_status after a post change (publish_post's build_id + after_event_id)", () => {
+  // A post rebuild never sets the build to publishing: it stays as it was until
+  // the queued job writes deployed/failed and the deploy events.
+  it("follows a rebuild of a deployed build: waiting first, done only on the new deployment.completed", async () => {
+    const clock = fakeClock();
+    buildToolsClock.current = clock;
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" })],
+      events: [{ id: 41, build_id: 31, event_type: "deployment.completed", payload: null, created_at: "old" }],
+    });
+    const c = await connect(serve(b));
+
+    const first = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41, wait_seconds: 4 } });
+    expect(first.isError, text(first)).toBeFalsy();
+    expect(first.structuredContent).toMatchObject({
+      done: false,
+      succeeded: null,
+      waiting_for_start: true,
+      after_event_id: 41,
+      next: expect.stringMatching(/Waiting for the rebuild to start[\s\S]*3 minutes[\s\S]*Pro\+[\s\S]*after_event_id 41/),
+    });
+    expect((first.structuredContent as { next: string }).next).not.toMatch(/publish_build/);
+
+    // Polls 0-1 were the first call; the rebuild starts during the second.
+    b.onStatusPoll = (state, i) => {
+      if (i === 3) state.events.push({ id: 42, build_id: 31, event_type: "build.enqueued", payload: null, created_at: "t1" });
+      if (i === 5) state.events.push({ id: 43, build_id: 31, event_type: "deployment.completed", payload: null, created_at: "t2" });
+    };
+    const second = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41, wait_seconds: 20 } });
+    expect(second.structuredContent).toMatchObject({
+      done: true,
+      succeeded: true,
+      waiting_for_start: false,
+      after_event_id: 43,
+      events: [{ id: 42 }, { id: 43, type: "deployment.completed" }],
+    });
+  });
+
+  it("never reports a draft active build as done, nor tells the model to call publish_build", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "draft" })] });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 0, wait_seconds: 6 } });
+    expect(res.structuredContent).toMatchObject({ done: false, succeeded: null, waiting_for_start: true });
+    expect((res.structuredContent as { next: string }).next).not.toMatch(/publish_build/);
+    expect(text(res)).toMatch(/waiting for the rebuild to start/);
+  });
+
+  it("ignores archive events while waiting for a publish", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" })],
+      onStatusPoll: (state, i) => {
+        if (i === 0) state.events.push({ id: 50, build_id: 31, event_type: "archive.completed", payload: null, created_at: "t" });
+      },
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 49, wait_seconds: 4 } });
+    expect(res.structuredContent).toMatchObject({ done: false, succeeded: null, waiting_for_start: true, events: [{ id: 50, type: "archive.completed" }] });
+  });
+
+  it("without a cursor still reports a settled build at once and offers publish_build", async () => {
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "deployed" })] });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID } });
+    expect(res.structuredContent).toMatchObject({ done: true, succeeded: true, waiting_for_start: false });
+  });
+});
+
+describe("get_deploy_status: stuck publishes and the wait cap", () => {
+  it("flags a build publishing with no events for longer than the queue delay plus 5 minutes", async () => {
+    buildToolsClock.current = fakeClock();
+    const old = new Date(Date.now() - 9 * 60_000).toISOString();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "publishing", updated_at: old })],
+      events: [{ id: 41, build_id: 31, event_type: "deployment.completed", payload: null, created_at: old }],
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 41, wait_seconds: 0 } });
+    expect(res.structuredContent).toMatchObject({
+      done: false,
+      possibly_stuck: true,
+      next: expect.stringMatching(/possibly stuck[\s\S]*webhook may have failed[\s\S]*publish_build[\s\S]*30 minutes/),
+    });
+  });
+
+  it("does not flag a free/pro publish still inside the queue delay plus grace", async () => {
+    buildToolsClock.current = fakeClock();
+    const recent = new Date(Date.now() - 6 * 60_000).toISOString();
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "publishing", updated_at: recent })] });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 0, wait_seconds: 0 } });
+    expect(res.structuredContent).toMatchObject({ done: false, possibly_stuck: false, next: expect.stringMatching(/Still publishing/) });
+  });
+
+  it("uses a shorter threshold on Pro+, which has no queue delay", async () => {
+    buildToolsClock.current = fakeClock();
+    const recent = new Date(Date.now() - 6 * 60_000).toISOString();
+    const b = backend({ tier: "pro_plus", activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "publishing", updated_at: recent })] });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 0, wait_seconds: 0 } });
+    expect(res.structuredContent).toMatchObject({ possibly_stuck: true });
+  });
+
+  it("caps wait_seconds at 45 and stays inside it", async () => {
+    const clock = fakeClock();
+    buildToolsClock.current = clock;
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "publishing", updated_at: new Date().toISOString() })] });
+    const c = await connect(serve(b));
+    const over = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 0, wait_seconds: 46 } });
+    expect(over.isError).toBe(true);
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, after_event_id: 0, wait_seconds: 45 } });
+    expect(res.structuredContent).toMatchObject({ done: false });
+    expect(clock.t).toBeLessThan(45_000);
+    // Polls every 2 s and skips a sleep that would leave no time for the poll after it.
+    expect(clock.sleeps.reduce((a, x) => a + x, 0)).toBe(44_000);
+  });
+});
+
+describe("publish_build rollback", () => {
+  it("restores the previous active build when publish-build fails after switching it", async () => {
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5 })], publishStatus: 500 });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/publisher webhook failed[\s\S]*restored to id 31/);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects").map((x) => x.body)).toEqual([{ active_build_id: 30 }, { active_build_id: 31 }]);
+    expect(b.activeBuildId).toBe(31);
+  });
+
+  it("says so when the restore fails too", async () => {
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5 })],
+      publishStatus: 500,
+      restoreStatus: 500,
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Restoring the previous active build \(id 31\) also failed[\s\S]*list_builds/);
+  });
+
+  it("does not touch the active build when it was not changed", async () => {
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 31, number: 5, status: "draft" })], publishStatus: 500 });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
   });
 });
 
@@ -751,5 +923,13 @@ describe("delete_project", () => {
     const c = await connect(fake, ENV);
     const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, confirm_domain: "acme" } });
     expect(res.structuredContent).toMatchObject({ deleted: true, already_removed: true });
+  });
+
+  it("reports delete-project's 403 (missing or not yours) as an error, not as already removed", async () => {
+    const fake = serve(backend({ deleteStatus: 403 }));
+    const c = await connect(fake, ENV);
+    const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, confirm_domain: "acme" } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/refused to delete[\s\S]*403[\s\S]*get_project/);
   });
 });

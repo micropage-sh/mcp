@@ -10,6 +10,12 @@ export const TERMINAL_DEPLOY_EVENTS: ReadonlySet<string> = new Set([
   "archive.failed",
 ]);
 
+/**
+ * The events that end a publish. archive.* events belong to the zip export,
+ * which runs on the same build, so they must not end a publish wait.
+ */
+export const PUBLISH_TERMINAL_EVENTS: ReadonlySet<string> = new Set(["build.failed", "deployment.completed"]);
+
 export interface DeployEventRow {
   id: number;
   event_type: string | null;
@@ -79,6 +85,16 @@ export async function getMaxDeployEventId(http: Http, buildId: number): Promise<
   return Number.isFinite(n) ? n : 0;
 }
 
+/** created_at of the build's newest deploy event, null when it has none. */
+export async function getLatestDeployEventAt(http: Http, buildId: number): Promise<string | null> {
+  const row = await http.selectOne<{ created_at: string | null }>("build_deploy_events", {
+    select: "created_at",
+    filters: { build_id: eq(buildId) },
+    order: "id.desc",
+  });
+  return row?.created_at ?? null;
+}
+
 export const EVENTS_PAGE = 100;
 
 export async function fetchDeployEventsAfter(http: Http, buildId: number, afterId: number): Promise<DeployEventRow[]> {
@@ -123,9 +139,15 @@ export interface PollOptions {
   intervalMs?: number;
   clock?: Clock;
   /**
-   * When false, terminal events do not end the wait and only the build status
-   * decides. For callers without a cursor, whose event history may include
-   * the end of an earlier publish of the same build.
+   * True when afterId is a cursor taken before this publish started. Then only
+   * a terminal event after it ends the wait, and the status counts only once
+   * it has moved away from an in-progress value during this wait: a post
+   * rebuild never sets the build to publishing, so a "deployed" or "draft"
+   * status read before the queued rebuild starts says nothing about it.
+   *
+   * When false, events never end the wait and the status alone decides. For
+   * callers without a cursor, whose event history may include the end of an
+   * earlier publish of the same build.
    */
   trustEvents?: boolean;
   /** Called after every poll; a throw here is swallowed. */
@@ -136,27 +158,35 @@ export interface PollResult {
   build: BuildStatusRow;
   events: DeployEvent[];
   after_event_id: number;
-  /** True once a terminal event arrived or the build is no longer publishing. */
+  /** True once a terminal event arrived or the status settled (see PollOptions.trustEvents). */
   done: boolean;
   terminal_event: DeployEvent | null;
   /** True when wait ran out before done. */
   timed_out: boolean;
+  /**
+   * Cursor mode only: the build is not in progress and nothing has happened
+   * since the cursor, so the deploy has not started yet (a queued rebuild).
+   */
+  waiting_for_start: boolean;
 }
 
 /**
- * Polls builds.status and build_deploy_events (id > cursor) until a terminal
- * event, a status that is no longer in progress, or waitMs. Always polls at
- * least once, so waitMs 0 is a single snapshot.
+ * Polls builds.status and build_deploy_events (id > cursor) until the deploy
+ * ends (see PollOptions.trustEvents) or waitMs runs out. Always polls at
+ * least once, so waitMs 0 is a single snapshot. Never sleeps past the
+ * deadline and does not start a poll it would have to finish after it.
  */
 export async function pollDeployStatus(options: PollOptions): Promise<PollResult> {
   const { http, projectId, buildId } = options;
   const clock = options.clock ?? realClock;
   const interval = options.intervalMs ?? POLL_INTERVAL_MS;
+  const cursorMode = options.trustEvents !== false;
   const start = clock.now();
   const deadline = start + Math.max(0, options.waitMs);
   let cursor = options.afterId;
   const events: DeployEvent[] = [];
   let terminal: DeployEvent | null = null;
+  let sawInProgress = false;
 
   for (;;) {
     // Status before events: the publisher writes the status first, so the
@@ -173,10 +203,13 @@ export async function pollDeployStatus(options: PollOptions): Promise<PollResult
     for (const ev of fresh) cursor = Math.max(cursor, ev.id);
     events.push(...fresh);
 
-    if (options.trustEvents !== false) {
-      terminal = fresh.find((e) => TERMINAL_DEPLOY_EVENTS.has(e.type)) ?? terminal;
+    const inProgress = IN_PROGRESS_STATUSES.has(build.status ?? "");
+    if (cursorMode) {
+      terminal ??= fresh.find((e) => PUBLISH_TERMINAL_EVENTS.has(e.type)) ?? null;
     }
-    const done = terminal !== null || !IN_PROGRESS_STATUSES.has(build.status ?? "");
+    const settledByStatus = !inProgress && (!cursorMode || sawInProgress);
+    if (inProgress) sawInProgress = true;
+    const done = terminal !== null || settledByStatus;
 
     if (options.onPoll) {
       try {
@@ -186,12 +219,20 @@ export async function pollDeployStatus(options: PollOptions): Promise<PollResult
       }
     }
 
-    // A full page means more events are waiting: drain them before returning.
-    const more = rows.length >= EVENTS_PAGE;
     const now = clock.now();
-    if (!more && (done || now >= deadline)) {
-      return { build, events, after_event_id: cursor, done, terminal_event: terminal, timed_out: !done };
+    // A full page means more events are waiting: drain them while time allows.
+    const more = rows.length >= EVENTS_PAGE && now < deadline;
+    if (!more && (done || deadline - now <= interval)) {
+      return {
+        build,
+        events,
+        after_event_id: cursor,
+        done,
+        terminal_event: terminal,
+        timed_out: !done,
+        waiting_for_start: cursorMode && !done && !inProgress,
+      };
     }
-    if (!more) await clock.sleep(Math.min(interval, deadline - now));
+    if (!more) await clock.sleep(interval);
   }
 }

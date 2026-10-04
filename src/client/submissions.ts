@@ -60,12 +60,11 @@ export async function listFormsWithCounts(http: Http, projectId: number): Promis
   }
   if (forms.length === 0) return [];
 
-  const rows = await http.select<{ form_id: string | null }>("form_submissions", {
-    select: "form_id",
-    filters: { project_id: eq(projectId), flagged_at: is("null") },
-  });
-  const counts = new Map<string, number>();
-  for (const r of rows) if (r.form_id) counts.set(r.form_id, (counts.get(r.form_id) ?? 0) + 1);
+  // One exact count per form: selecting the rows would stop at PostgREST's max_rows.
+  const totals = await Promise.all(
+    forms.map((f) => http.count("form_submissions", { project_id: eq(projectId), form_id: eq(f.id), flagged_at: is("null") })),
+  );
+  const counts = new Map(forms.map((f, i) => [f.id, totals[i]!]));
 
   return forms.map((f) => ({
     id: f.id,

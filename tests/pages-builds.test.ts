@@ -100,11 +100,11 @@ describe("pollDeployStatus", () => {
   it("stops at a terminal event even while the status still says publishing", async () => {
     const fake = script([
       ["publishing", [{ id: 11, event_type: "build.enqueued" }]],
-      ["publishing", [{ id: 12, event_type: "archive.failed" }]],
+      ["publishing", [{ id: 12, event_type: "deployment.completed" }]],
     ]);
     const c = clock();
     const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 10, waitMs: 60_000, clock: c });
-    expect(r).toMatchObject({ done: true, timed_out: false, after_event_id: 12, terminal_event: { type: "archive.failed" } });
+    expect(r).toMatchObject({ done: true, timed_out: false, after_event_id: 12, terminal_event: { type: "deployment.completed" } });
     expect(c.sleeps).toEqual([2000]);
     const q = new URL(fake.calls[1]!.url).searchParams;
     expect(q.get("id")).toBe("gt.10");
@@ -112,22 +112,73 @@ describe("pollDeployStatus", () => {
     expect(new URL(fake.calls[3]!.url).searchParams.get("id")).toBe("gt.11");
   });
 
-  it("stops when the build is no longer publishing", async () => {
-    const fake = script([["failed", []]]);
-    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 0, waitMs: 60_000, clock: clock() });
-    expect(r).toMatchObject({ done: true, terminal_event: null, after_event_id: 0 });
+  it("does not end a publish wait on archive events", async () => {
+    const fake = script([
+      ["publishing", [{ id: 11, event_type: "archive.failed" }]],
+      ["publishing", [{ id: 12, event_type: "archive.completed" }]],
+      ["publishing", [{ id: 13, event_type: "build.failed" }]],
+    ]);
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 10, waitMs: 60_000, clock: clock() });
+    expect(r).toMatchObject({ done: true, after_event_id: 13, terminal_event: { type: "build.failed" } });
+    expect(r.events.map((e) => e.id)).toEqual([11, 12, 13]);
   });
 
-  it("returns done false after waitMs, never sleeping past the deadline", async () => {
+  it("without a cursor, stops when the build is no longer publishing", async () => {
+    const fake = script([["failed", []]]);
+    const r = await pollDeployStatus({
+      http: makeHttp(fake),
+      projectId: 7,
+      buildId: 5,
+      afterId: 0,
+      waitMs: 60_000,
+      clock: clock(),
+      trustEvents: false,
+    });
+    expect(r).toMatchObject({ done: true, terminal_event: null, after_event_id: 0, waiting_for_start: false });
+  });
+
+  it("with a cursor, a status that is already settled does not end the wait (queued post rebuild)", async () => {
+    const fake = script([
+      ["deployed", []],
+      ["deployed", []],
+      ["deployed", [{ id: 21, event_type: "build.enqueued" }]],
+      ["deployed", [{ id: 22, event_type: "deployment.completed" }]],
+    ]);
+    const c = clock();
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 20, waitMs: 60_000, clock: c });
+    expect(r).toMatchObject({ done: true, waiting_for_start: false, after_event_id: 22, terminal_event: { id: 22 } });
+    expect(c.sleeps).toEqual([2000, 2000, 2000]);
+  });
+
+  it("with a cursor, reports waiting_for_start while a draft active build has no new events", async () => {
+    const fake = script([
+      ["draft", []],
+      ["draft", []],
+    ]);
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 20, waitMs: 3_000, clock: clock() });
+    expect(r).toMatchObject({ done: false, timed_out: true, waiting_for_start: true, after_event_id: 20 });
+  });
+
+  it("with a cursor, a status that moves away from publishing during the wait ends it", async () => {
     const fake = script([
       ["publishing", []],
+      ["failed", []],
+    ]);
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 20, waitMs: 60_000, clock: clock() });
+    expect(r).toMatchObject({ done: true, terminal_event: null, waiting_for_start: false });
+  });
+
+  it("returns done false within waitMs, never sleeping or polling past the deadline", async () => {
+    const fake = script([
       ["publishing", []],
       ["publishing", []],
     ]);
     const c = clock();
     const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 3, waitMs: 3_000, clock: c });
-    expect(r).toMatchObject({ done: false, timed_out: true, after_event_id: 3 });
-    expect(c.sleeps).toEqual([2000, 1000]);
+    expect(r).toMatchObject({ done: false, timed_out: true, after_event_id: 3, waiting_for_start: false });
+    expect(c.sleeps).toEqual([2000]);
+    // The last poll leaves at least one interval for its own requests.
+    expect(c.t - 1_000).toBeLessThan(3_000);
   });
 
   it("waitMs 0 polls exactly once", async () => {
@@ -139,15 +190,25 @@ describe("pollDeployStatus", () => {
     expect(fake.calls).toHaveLength(2);
   });
 
-  it("drains a full page of events before returning", async () => {
+  it("drains a full page of events before returning, while the budget lasts", async () => {
     const page = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, event_type: "deployment.domain_wiring" }));
     const fake = script([
-      ["deployed", page],
+      ["publishing", page],
       ["deployed", [{ id: 101, event_type: "deployment.completed" }]],
     ]);
-    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 0, waitMs: 0, clock: clock() });
+    const c = clock();
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 0, waitMs: 10_000, clock: c });
     expect(r.events).toHaveLength(101);
-    expect(r.after_event_id).toBe(101);
+    expect(r).toMatchObject({ after_event_id: 101, done: true });
+    expect(c.sleeps).toEqual([]);
+  });
+
+  it("does not drain past the deadline; the cursor resumes on the next call", async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, event_type: "deployment.domain_wiring" }));
+    const fake = script([["publishing", page]]);
+    const r = await pollDeployStatus({ http: makeHttp(fake), projectId: 7, buildId: 5, afterId: 0, waitMs: 0, clock: clock() });
+    expect(r).toMatchObject({ after_event_id: 100, done: false });
+    expect(fake.calls).toHaveLength(2);
   });
 
   it("swallows a throwing progress callback", async () => {
@@ -160,6 +221,7 @@ describe("pollDeployStatus", () => {
       afterId: 0,
       waitMs: 0,
       clock: clock(),
+      trustEvents: false,
       onPoll: () => {
         throw new Error("boom");
       },

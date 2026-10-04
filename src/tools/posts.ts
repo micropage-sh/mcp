@@ -63,22 +63,58 @@ function projectBrief(p: Project): z.infer<typeof ProjectBrief> {
   return { id: p.id, uuid: p.uuid, live_url: p.live_url };
 }
 
+interface ActiveBuildState {
+  number: number | null;
+  status: string | null;
+}
+
 /** The site rebuild a post change triggers re-deploys the project's active build, whatever state it is in. */
-async function activeBuildStatus(ctx: ToolContext, project: Project): Promise<string | null> {
+async function activeBuildState(ctx: ToolContext, project: Project): Promise<ActiveBuildState | null> {
   if (project.active_build_id === null) return null;
-  const row = await ctx.http.selectOne<{ status: string | null }>("builds", {
-    select: "status",
+  const row = await ctx.http.selectOne<{ number: number | null; status: string | null }>("builds", {
+    select: "number,status",
     filters: { id: eq(project.active_build_id) },
   });
-  return row?.status ?? null;
+  return row ? { number: row.number ?? null, status: row.status ?? null } : null;
 }
 
 const DRAFT_GOES_LIVE =
-  "The project's active build is an unpublished draft (status %s). The site rebuild this triggers deploys the active build, " +
-  "so that draft page content would go live together with the post. Publish or discard the page draft first if that is not wanted.";
+  "The project's active build is an unpublished page draft (build %n, status %s). The site rebuild this triggers deploys the active build, " +
+  "so that draft page content would go live together with the post. Publish the draft first with publish_build if the user wants it live, " +
+  "or pass allow_draft_deploy: true once the user agrees to it going live.";
 
-function draftWarning(status: string | null): string | null {
-  return status === "draft" || status === "failed" ? DRAFT_GOES_LIVE.replace("%s", status) : null;
+function draftWarning(build: ActiveBuildState | null): string | null {
+  const status = build?.status ?? null;
+  return status === "draft" || status === "failed"
+    ? DRAFT_GOES_LIVE.replace("%n", `v${build?.number ?? "?"}`).replace("%s", status)
+    : null;
+}
+
+const AllowDraftDeployInput = z
+  .boolean()
+  .optional()
+  .describe(
+    "Set true only after the user agrees that an unpublished page draft (left by save_page or the editor) goes live with this " +
+      "site rebuild. Without it the call is refused while the project's active build is a draft or failed build.",
+  );
+
+/**
+ * Post changes that rebuild the site redeploy projects.active_build_id even
+ * when it is an unpublished page draft (backlog TASK-54), so they are refused
+ * until the user has accepted that or published the draft. Returns the
+ * warning to pass on when the user did accept it.
+ */
+async function guardDraftDeploy(ctx: ToolContext, project: Project, allow: boolean | undefined, action: string): Promise<string | null> {
+  const build = await activeBuildState(ctx, project);
+  const warning = draftWarning(build);
+  if (warning === null) return null;
+  if (allow === true) {
+    return (
+      `The project's active build is an unpublished page draft (build v${build?.number ?? "?"}, status ${build?.status}); ` +
+      "it goes live with this site rebuild, as accepted with allow_draft_deploy."
+    );
+  }
+  throw new MicropageError("DRAFT_WOULD_DEPLOY", `${action} rebuilds the site. ${warning} Nothing was changed.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +278,7 @@ export const UpsertPostInput = z
         "Required (true) when the post is already published: saving then changes the live page at once and rebuilds the site. " +
           "Ask the user before setting it.",
       ),
+    allow_draft_deploy: AllowDraftDeployInput,
   })
   .strict();
 
@@ -284,6 +321,9 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
         "Nothing was saved.",
     );
   }
+  const siteNote = existing?.published_at
+    ? await guardDraftDeploy(ctx, project, args.allow_draft_deploy, `Saving the published post "${slug}"`)
+    : null;
 
   const formId = email ? await resolveListFormId(ctx.http, project.id, args.list!) : null;
   const heroUrl = await resolveHeroUrl(ctx.http, project.id, args.hero);
@@ -310,6 +350,7 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
         "Upload them with upload_asset, swap in the URLs from get_file_url and save again.",
     );
   }
+  if (siteNote && res.published) warnings.push(siteNote);
   if (!res.published) warnings.push("Saved as a draft: not on the site and not emailed. preview_post_send then publish_post makes it live.");
 
   return {
@@ -412,7 +453,7 @@ export async function runPreviewPostSend(
   const [lists, recipients, buildStatus] = await Promise.all([
     formNamesById(ctx.http, post.form_id ? [post.form_id] : []),
     facts.willEmail ? countActiveSubscribers(ctx.http, post.form_id!) : Promise.resolve(0),
-    post.web_visibility !== "none" ? activeBuildStatus(ctx, project) : Promise.resolve(null),
+    post.web_visibility !== "none" ? activeBuildState(ctx, project) : Promise.resolve(null),
   ]);
 
   const blocked = facts.willEmail && !ctx.flags.allowSend;
@@ -454,6 +495,7 @@ export const PublishPostInput = z
       .min(1)
       .max(200)
       .describe("The confirmation_token from preview_post_send for this post, taken after its last change and shown to the user."),
+    allow_draft_deploy: AllowDraftDeployInput,
   })
   .strict();
 
@@ -489,6 +531,9 @@ export async function runPublishPost(
   }
   requireConfirmationToken(tokens, args.confirmation_token, facts.tokenPayload, "preview_post_send");
 
+  const rebuilds = post.web_visibility !== "none" && project.active_build_id !== null;
+  const siteNote = rebuilds ? await guardDraftDeploy(ctx, project, args.allow_draft_deploy, `Publishing "${post.slug}"`) : null;
+
   if (facts.willEmail && handlerCtx) {
     const [lists, recipients] = await Promise.all([
       formNamesById(ctx.http, [post.form_id!]),
@@ -507,7 +552,6 @@ export async function runPublishPost(
     }
   }
 
-  const rebuilds = post.web_visibility !== "none" && project.active_build_id !== null;
   let afterEventId: number | null = null;
   if (rebuilds) {
     afterEventId = await getMaxDeployEventId(ctx.http, project.active_build_id!).catch(() => null);
@@ -517,10 +561,16 @@ export async function runPublishPost(
   const notes = [
     res.emailed ? `Emailed to ${res.recipient_count} recipient(s); sending runs in the background.` : "Published on the web only; no email.",
     rebuilds
-      ? "A site rebuild was queued; the post appears under /content once it deploys (follow with get_deploy_status)."
+      ? "A site rebuild was queued; the post appears under /content once it deploys. It starts after up to about 3 minutes " +
+        "in the queue unless the account is Pro+, then takes 1-2 minutes." +
+        (afterEventId === null
+          ? " The deploy cursor could not be read, so check the site or get_project in a few minutes instead of get_deploy_status."
+          : ` Follow it with get_deploy_status (build "id:${project.active_build_id}", after_event_id ${afterEventId}): it reports ` +
+            "waiting_for_start until the rebuild begins and done only once the rebuild's own deploy event arrives.")
       : project.active_build_id === null
         ? "The project has never been published, so the post is not on a site until the page is published with publish_build."
         : "The post has visibility none, so no web page changes.",
+    ...(siteNote ? [siteNote] : []),
   ];
   return {
     kind: "done",
@@ -548,7 +598,14 @@ const ConfirmInput = z
   .optional()
   .describe("Must be true. Ask the user first: this changes the live site.");
 
-export const UnpublishPostInput = z.object({ project: ProjectRef, slug: SlugInput, confirm: ConfirmInput }).strict();
+export const UnpublishPostInput = z
+  .object({ project: ProjectRef, slug: SlugInput, confirm: ConfirmInput, allow_draft_deploy: AllowDraftDeployInput })
+  .strict();
+
+const SiteWarningOutput = z
+  .string()
+  .nullable()
+  .describe("Set when the site rebuild also put an unpublished page draft live (accepted with allow_draft_deploy).");
 
 export const UnpublishPostOutput = z.object({
   project: ProjectBrief,
@@ -556,6 +613,7 @@ export const UnpublishPostOutput = z.object({
   slug: z.string(),
   unpublished: z.boolean(),
   rebuild_queued: z.boolean(),
+  site_warning: SiteWarningOutput,
 });
 export type UnpublishPostResult = z.infer<typeof UnpublishPostOutput>;
 
@@ -564,6 +622,12 @@ export async function runUnpublishPost(ctx: ToolContext, args: z.infer<typeof Un
   requireConfirm(args, `Unpublishing the post "${slug}"`);
   await gateTool(ctx, "unpublish_post");
   const project = await resolveProject(ctx, args.project);
+  // unpublish-post rebuilds whenever the post exists, published or not.
+  const exists = (await getPostBySlug(ctx.http, project.id, slug)) !== null;
+  const siteNote =
+    exists && project.active_build_id !== null
+      ? await guardDraftDeploy(ctx, project, args.allow_draft_deploy, `Unpublishing "${slug}"`)
+      : null;
   const res = await unpublishPost(ctx.http, project.id, slug);
   return {
     project: projectBrief(project),
@@ -571,6 +635,7 @@ export async function runUnpublishPost(ctx: ToolContext, args: z.infer<typeof Un
     slug,
     unpublished: res.unpublished === true,
     rebuild_queued: res.unpublished === true && project.active_build_id !== null,
+    site_warning: res.unpublished === true ? siteNote : null,
   };
 }
 
@@ -579,6 +644,7 @@ export const DeletePostInput = z
     project: ProjectRef,
     slug: SlugInput,
     confirm: ConfirmInput.describe("Must be true. Ask the user first: the post is deleted for good and leaves the live site."),
+    allow_draft_deploy: AllowDraftDeployInput,
   })
   .strict();
 
@@ -587,6 +653,7 @@ export const DeletePostOutput = z.object({
   slug: z.string(),
   deleted: z.boolean().describe("False when no post had that slug (nothing to delete)."),
   rebuild_queued: z.boolean(),
+  site_warning: SiteWarningOutput,
 });
 export type DeletePostResult = z.infer<typeof DeletePostOutput>;
 
@@ -595,19 +662,27 @@ export async function runDeletePost(ctx: ToolContext, args: z.infer<typeof Delet
   requireConfirm(args, `Deleting the post "${slug}"`);
   await gateTool(ctx, "delete_post");
   const project = await resolveProject(ctx, args.project);
+  // delete-post rebuilds whenever a row was removed, published or not.
+  const exists = (await getPostBySlug(ctx.http, project.id, slug)) !== null;
+  const siteNote =
+    exists && project.active_build_id !== null
+      ? await guardDraftDeploy(ctx, project, args.allow_draft_deploy, `Deleting "${slug}"`)
+      : null;
   const res = await deletePost(ctx.http, project.id, slug);
   return {
     project: projectBrief(project),
     slug,
     deleted: res.deleted === true,
     rebuild_queued: res.deleted === true && project.active_build_id !== null,
+    site_warning: res.deleted === true ? siteNote : null,
   };
 }
 
 // ---------------------------------------------------------------------------
 
 const REBUILD_CAVEAT =
-  "Any site rebuild redeploys the project's active build, so an unpublished page draft left by save_page goes live with it.";
+  "Any site rebuild redeploys the project's active build, so an unpublished page draft left by save_page would go live with it; " +
+  "while the active build is a draft or failed build the call is refused unless allow_draft_deploy: true is passed after the user agrees.";
 
 export function registerPostTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(

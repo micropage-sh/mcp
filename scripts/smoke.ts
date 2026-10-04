@@ -1,8 +1,10 @@
 /**
  * End-to-end over real MCP: spawn the stdio server, list what it advertises,
- * and check the invariants every tool must keep. Offline by default.
+ * and check the invariants every tool must keep. Offline by default;
+ * MICROPAGE_SMOKE_LIVE=1 also calls the read-only whoami and list_projects.
  *
  *   npm run smoke
+ *   MICROPAGE_SMOKE_LIVE=1 npm run smoke
  */
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -61,6 +63,21 @@ const unannotated = tools
   })
   .map((t) => t.name);
 check("every tool sets all four annotation hints", unannotated.length === 0, unannotated.join(", "));
+
+// Opt-in: read-only calls against the account in the local CLI session.
+if (process.env.MICROPAGE_SMOKE_LIVE === "1") {
+  for (const name of ["whoami", "list_projects"]) {
+    try {
+      const res = await client.callTool({ name, arguments: {} });
+      const detail = res.isError ? JSON.stringify(res.content).slice(0, 300) : "";
+      check(`live: ${name} returns without isError`, res.isError !== true, detail);
+    } catch (err) {
+      check(`live: ${name} returns without isError`, false, err instanceof Error ? err.message : String(err));
+    }
+  }
+} else {
+  console.log("info  live calls skipped (set MICROPAGE_SMOKE_LIVE=1 to call whoami and list_projects)");
+}
 
 await client.close();
 console.log(failures === 0 ? "\nOK" : `\n${failures} FAILED`);
