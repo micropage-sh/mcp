@@ -68,6 +68,8 @@ interface Backend {
   deleteStatus?: number;
   /** HTTP status publish-build answers with instead of success. */
   publishStatus?: number;
+  /** Body publish-build answers with alongside publishStatus. */
+  publishBody?: unknown;
   /** HTTP status a PATCH of projects answers with after the first one. */
   restoreStatus?: number;
   projectPatches: number;
@@ -180,7 +182,7 @@ function serve(b: Backend): FakeFetch {
         return { body: rows.slice(0, Number(q.get("limit") ?? 1000)) };
       }
       case "POST /functions/v1/publish-build": {
-        if (b.publishStatus) return { status: b.publishStatus, body: { error: "publisher webhook failed" } };
+        if (b.publishStatus) return { status: b.publishStatus, body: b.publishBody ?? { error: "publisher webhook failed" } };
         const { buildId } = call.body as { buildId: number };
         const target = b.builds.find((x) => x.id === buildId);
         if (target) target.status = "publishing";
@@ -801,6 +803,71 @@ describe("publish_build rollback", () => {
     const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/Restoring the previous active build \(id 31\) also failed[\s\S]*list_builds/);
+  });
+
+  it("reports a reverted 502 as rejected, with the build's status, and restores the active build", async () => {
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5 })],
+      publishStatus: 502,
+      publishBody: { error: "Publisher webhook failed", reverted: true, status_unknown: false },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(
+      /"text":"The publisher rejected the publish; build v4 is back to deployed\. Nothing went live\. Retry with publish_build\.[\s\S]*restored to id 31/,
+    );
+    expect(text(res)).not.toMatch(/get_deploy_status/);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects").map((x) => x.body)).toEqual([{ active_build_id: 30 }, { active_build_id: 31 }]);
+    expect(b.activeBuildId).toBe(31);
+  });
+
+  it("reports a reverted 502 even when the active build was not changed", async () => {
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "draft" })],
+      publishStatus: 502,
+      publishBody: { error: "Publisher webhook failed", reverted: true, status_unknown: false },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/build v5 is back to draft\. Nothing went live\. Retry with publish_build/);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
+  });
+
+  it("on a status_unknown 502 points at get_deploy_status and leaves the active build on the published one", async () => {
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5 })],
+      publishStatus: 502,
+      publishBody: { error: "Publisher webhook timed out", reverted: false, status_unknown: true },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(
+      /"text":"The publish may have been queued\. Call get_deploy_status with build \W+id:30\W+ before retrying, to avoid a double publish\./,
+    );
+    expect(text(res)).toMatch(/left at id 30 rather than restored to id 31, because the publish may be running for that build/);
+    expect(text(res)).not.toMatch(/Nothing was published|Nothing went live/);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects").map((x) => x.body)).toEqual([{ active_build_id: 30 }]);
+    expect(b.activeBuildId).toBe(30);
+  });
+
+  it("treats a plain 500 as before: restores the active build and says nothing was published", async () => {
+    const b = backend({ activeBuildId: 31, builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5 })], publishStatus: 500 });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "publish_build", arguments: { project: UUID, build: "v4", confirm: true } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Starting the publish failed: .*HTTP 500.*publisher webhook failed[\s\S]*restored to id 31, as before\. Nothing was published\./);
+    expect(text(res)).not.toMatch(/rejected|get_deploy_status/);
+    expect(b.activeBuildId).toBe(31);
   });
 
   it("does not touch the active build when it was not changed", async () => {

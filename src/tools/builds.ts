@@ -107,31 +107,90 @@ function etaFor(tier: PlanTier | null): { eta_seconds: number; eta: string } {
 }
 
 /**
+ * publish-build answers 502 when the publisher webhook failed, saying whether
+ * it put the build back (reverted) or cannot tell whether the publish was
+ * queued (status_unknown). Anything else is a plain failure.
+ */
+type PublishFailure = "reverted" | "status_unknown" | "other";
+
+function classifyPublishFailure(err: unknown): PublishFailure {
+  if (!(err instanceof MicropageError) || err.status !== 502) return "other";
+  const data = err.data;
+  if (!data || typeof data !== "object") return "other";
+  const body = data as Record<string, unknown>;
+  // Unknown wins: treating a maybe-queued publish as reverted invites a double publish.
+  if (body.status_unknown === true) return "status_unknown";
+  if (body.reverted === true) return "reverted";
+  return "other";
+}
+
+/**
  * Puts the previous active build back after a publish that did not start, so
  * a failed publish_build leaves the project as it found it. Best effort: the
- * returned error says whether the restore worked.
+ * returned note says whether the restore worked.
  */
-async function restoreActiveBuild(ctx: ToolContext, project: Project, cause: unknown): Promise<MicropageError> {
+async function restoreActiveBuild(ctx: ToolContext, project: Project): Promise<{ restored: boolean; note: string }> {
   const previous = project.active_build_id;
-  const base = cause instanceof MicropageError ? cause : null;
-  const reason = cause instanceof Error ? cause.message : String(cause);
-  let note: string;
   try {
     await setActiveBuild(ctx.http, project.id, previous);
-    note =
-      previous === null
-        ? "The project's active build was reset to none, as before. Nothing was published."
-        : `The project's active build was restored to id ${previous}, as before. Nothing was published.`;
+    return {
+      restored: true,
+      note:
+        previous === null
+          ? "The project's active build was reset to none, as before."
+          : `The project's active build was restored to id ${previous}, as before.`,
+    };
   } catch {
-    note =
-      `Restoring the previous active build (id ${previous ?? "none"}) also failed, so the build named here is still ` +
-      "the active build. Call list_builds to check, and publish_build again or pick the build to keep.";
+    return {
+      restored: false,
+      note:
+        `Restoring the previous active build (id ${previous ?? "none"}) also failed, so the build named here is still ` +
+        "the active build. Call list_builds to check, and publish_build again or pick the build to keep.",
+    };
   }
-  return new MicropageError(base?.code ?? "PUBLISH_FAILED", `Starting the publish failed: ${reason} ${note}`, {
+}
+
+async function publishFailedError(
+  ctx: ToolContext,
+  project: Project,
+  target: BuildRow,
+  activeChanged: boolean,
+  cause: unknown,
+): Promise<MicropageError> {
+  const base = cause instanceof MicropageError ? cause : null;
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  const kind = classifyPublishFailure(cause);
+  const opts = {
     ...(base?.status === undefined ? {} : { status: base.status }),
     data: base?.data,
     cause,
-  });
+  };
+
+  if (kind === "status_unknown") {
+    const left = activeChanged
+      ? ` The project's active build was left at id ${target.id} rather than restored to ` +
+        `id ${project.active_build_id ?? "none"}, because the publish may be running for that build.`
+      : "";
+    return new MicropageError(
+      "PUBLISH_STATUS_UNKNOWN",
+      `The publish may have been queued. Call get_deploy_status with build "id:${target.id}" before retrying, to ` +
+        `avoid a double publish. (${reason})${left}`,
+      opts,
+    );
+  }
+
+  const restore = activeChanged ? await restoreActiveBuild(ctx, project) : null;
+  const note = restore ? ` ${restore.note}` : "";
+  if (kind === "reverted") {
+    return new MicropageError(
+      "PUBLISH_REJECTED",
+      `The publisher rejected the publish; build v${target.number ?? "?"} is back to ${target.status}. Nothing went ` +
+        `live. Retry with publish_build. (${reason})${note}`,
+      opts,
+    );
+  }
+  const nothing = restore?.restored === false ? "" : " Nothing was published.";
+  return new MicropageError(base?.code ?? "PUBLISH_FAILED", `Starting the publish failed: ${reason}${note}${nothing}`, opts);
 }
 
 export async function runPublishBuild(
@@ -164,8 +223,8 @@ export async function runPublishBuild(
     afterEventId = await getMaxDeployEventId(ctx.http, target.id);
     await invokePublishBuild(ctx.http, project.id, target.id);
   } catch (err) {
-    if (!activeChanged) throw err;
-    throw await restoreActiveBuild(ctx, project, err);
+    if (!activeChanged && classifyPublishFailure(err) === "other") throw err;
+    throw await publishFailedError(ctx, project, target, activeChanged, err);
   }
 
   let tier: PlanTier | null = null;
