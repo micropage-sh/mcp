@@ -7,12 +7,15 @@ import {
   type ServerContext,
 } from "@modelcontextprotocol/server";
 
-import { NoAuthProvider } from "./client/auth-provider.js";
-import { loadConfig } from "./client/config.js";
-import { Http } from "./client/http.js";
+import type { AuthProvider } from "./client/auth-provider.js";
+import { loadConfig, type MicropageConfig } from "./client/config.js";
+import { DeployTokenAuthProvider, readDeployTokenEnv } from "./client/deploy-token.js";
+import { Http, type FetchLike } from "./client/http.js";
+import { SessionAuthProvider, sessionFilePath } from "./client/session-store.js";
+import { PlanGate } from "./client/tier.js";
 import type { ServerDeps, ToolContext } from "./context.js";
 import { readEnvFlags } from "./guards.js";
-import { registerReference } from "./reference.js";
+import { LIST_CACHE_HINTS, registerReference } from "./reference.js";
 import { registerAccountTools } from "./tools/account.js";
 import { registerBuildTools } from "./tools/builds.js";
 import { registerFileTools } from "./tools/files.js";
@@ -23,11 +26,37 @@ import { VERSION } from "./version.js";
 
 export const SERVER_NAME = "micropage";
 
+export interface CreateDepsOptions {
+  /** Replaces global fetch for every outbound call (tests). */
+  fetch?: FetchLike;
+  now?: () => number;
+}
+
+/**
+ * Picks where tokens come from: a deploy token when MICROPAGE_DEPLOY_TOKEN and
+ * MICROPAGE_DEPLOY_PROJECT are both set (only one set throws), else the CLI
+ * session file. The session provider is used even when the file does not
+ * exist yet, so a `micropage login` after the server started takes effect
+ * without a restart; until then every call fails with NOT_LOGGED_IN.
+ */
+export function createAuthProvider(env: NodeJS.ProcessEnv, config: MicropageConfig, options: CreateDepsOptions = {}): AuthProvider {
+  const shared = {
+    config,
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  };
+  const deploy = readDeployTokenEnv(env);
+  if (deploy) return new DeployTokenAuthProvider({ ...shared, ...deploy });
+  return new SessionAuthProvider({ ...shared, path: sessionFilePath(env) });
+}
+
 /** Builds the process-wide deps from the environment. */
-export function createDeps(env: NodeJS.ProcessEnv = process.env): ServerDeps {
+export function createDeps(env: NodeJS.ProcessEnv = process.env, options: CreateDepsOptions = {}): ServerDeps {
   const config = loadConfig(env);
-  const auth = new NoAuthProvider();
-  return { config, auth, http: new Http({ config, auth }), flags: readEnvFlags(env) };
+  const auth = createAuthProvider(env, config, options);
+  const http = new Http({ config, auth, ...(options.fetch ? { fetch: options.fetch } : {}) });
+  const tier = new PlanGate({ http, auth, ...(options.now ? { now: options.now } : {}) });
+  return { config, auth, http, tier, flags: readEnvFlags(env) };
 }
 
 /**
@@ -37,7 +66,7 @@ export function createDeps(env: NodeJS.ProcessEnv = process.env): ServerDeps {
  * long-lived state (token refresh, caches) lives in `deps`, never here.
  */
 export function createServer(ctx: McpRequestContext, deps: ServerDeps): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: VERSION });
+  const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { cacheHints: LIST_CACHE_HINTS });
 
   const toolCtx: ToolContext = {
     ...deps,

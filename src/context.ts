@@ -3,6 +3,7 @@ import type { ClientCapabilities, ProtocolEra, ServerContext } from "@modelconte
 import type { AuthProvider } from "./client/auth-provider.js";
 import type { MicropageConfig } from "./client/config.js";
 import type { Http } from "./client/http.js";
+import type { PlanGate } from "./client/tier.js";
 
 /** User-set switches. Each defaults off; only the user's MCP config can turn them on. */
 export interface EnvFlags {
@@ -19,6 +20,8 @@ export interface ServerDeps {
   config: MicropageConfig;
   auth: AuthProvider;
   http: Http;
+  /** Paid-plan gate with its 5-minute plan_tier cache; call through gateTool() in tools. */
+  tier: PlanGate;
   flags: EnvFlags;
 }
 
