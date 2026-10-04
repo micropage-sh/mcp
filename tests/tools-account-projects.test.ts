@@ -245,4 +245,23 @@ describe("get_project", () => {
     expect(JSON.stringify(res.content)).toMatch(/pinned to project/);
     expect(fake.calls).toHaveLength(0);
   });
+
+  it("tells the model about the plan when the deploy-token owner is below Pro+", async () => {
+    const fake = createFakeFetch({
+      status: 403,
+      body: {
+        error: "Deploy tokens require the Pro+ plan.",
+        code: "plan_required",
+        required_tier: "pro_plus",
+        upgrade_url: "https://micropage.sh/pricing",
+      },
+    });
+    const c = await connect(fake, { MICROPAGE_DEPLOY_TOKEN: "mpd_x", MICROPAGE_DEPLOY_PROJECT: UUID });
+    const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
+    expect(res.isError).toBe(true);
+    const out = JSON.stringify(res.content);
+    expect(out).toMatch(/Deploy tokens require the Pro\+ plan\. Upgrade at https:\/\/micropage\.sh\/pricing\./);
+    expect(out).not.toMatch(/deploy token was rejected/);
+    expect(fake.calls.map((call) => new URL(call.url).pathname)).toEqual(["/functions/v1/exchange-deploy-token"]);
+  });
 });

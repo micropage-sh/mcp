@@ -268,6 +268,14 @@ export async function publishPost(http: Http, projectId: number, slug: string): 
   try {
     return await http.invoke<PublishPostResponse>("publish-post", { project_id: projectId, slug });
   } catch (err) {
+    if (err instanceof MicropageError && err.code === "PLAN_REQUIRED") {
+      throw new MicropageError(
+        "PLAN_REQUIRED",
+        `micropage refused to send this post: ${err.message} Tell the user. No email went out and the site was not ` +
+          "rebuilt, but the post may now be marked published; check with list_posts.",
+        { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
+      );
+    }
     if (err instanceof MicropageError && err.status === 402) {
       throw new MicropageError(
         "PLAN_LIMIT",

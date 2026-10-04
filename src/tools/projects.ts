@@ -355,6 +355,7 @@ export async function runCreateProject(
         { status: 409, data: err.data, cause: err },
       );
     }
+    if (err instanceof MicropageError && err.code === "PLAN_REQUIRED") throw err;
     if (err instanceof MicropageError && (err.status === 403 || err.status === 401)) {
       throw new MicropageError(
         "PROJECT_LIMIT",
@@ -552,6 +553,7 @@ export async function runDeleteProject(
     await ctx.http.invoke("delete-project", { projectId: project.id });
   } catch (err) {
     if (err instanceof MicropageError && err.status === 404) alreadyRemoved = true;
+    else if (err instanceof MicropageError && err.code === "PLAN_REQUIRED") throw err;
     else if (err instanceof MicropageError && err.status === 403) {
       throw new MicropageError(
         "DELETE_REFUSED",

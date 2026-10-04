@@ -1,7 +1,7 @@
 import { VERSION } from "../version.js";
 import type { AuthProvider } from "./auth-provider.js";
 import type { MicropageConfig } from "./config.js";
-import { MicropageError } from "./errors.js";
+import { MicropageError, planRequiredError } from "./errors.js";
 import type { FetchLike } from "./http.js";
 import { isProjectUuid } from "./project-ref.js";
 
@@ -135,6 +135,11 @@ export class DeployTokenAuthProvider implements AuthProvider {
       (typeof data?.message === "string" && data.message) ||
       `HTTP ${res.status}`;
 
+    // Checked before the 401/403 branch: a token whose owner dropped below
+    // Pro+ is valid but refused, and "token invalid" would send the user
+    // off rotating a token that is fine.
+    const planRequired = planRequiredError(data, { status: res.status });
+    if (planRequired) throw planRequired;
     if (res.status === 401 || res.status === 403) {
       throw new MicropageError(
         "DEPLOY_TOKEN_INVALID",

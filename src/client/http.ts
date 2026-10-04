@@ -1,7 +1,7 @@
 import { VERSION } from "../version.js";
 import type { AuthProvider } from "./auth-provider.js";
 import type { MicropageConfig } from "./config.js";
-import { MicropageError } from "./errors.js";
+import { MicropageError, planRequiredError } from "./errors.js";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -227,6 +227,8 @@ function describe(method: string, url: string): string {
 }
 
 function httpError(method: string, url: string, res: Response, data: unknown): MicropageError {
+  const planRequired = planRequiredError(data, { status: res.status });
+  if (planRequired) return planRequired;
   if (res.status === 401) {
     return new MicropageError(
       "SESSION_EXPIRED",

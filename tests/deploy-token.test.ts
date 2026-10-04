@@ -136,4 +136,31 @@ describe("DeployTokenAuthProvider", () => {
     expect(err.message).toMatch(/Invalid deploy token/);
     expect(err.message).toMatch(/MICROPAGE_DEPLOY_TOKEN/);
   });
+
+  it("reports a plan refusal as PLAN_REQUIRED, not as an invalid token", async () => {
+    const body = {
+      error: "Deploy tokens require the Pro+ plan.",
+      code: "plan_required",
+      required_tier: "pro_plus",
+      upgrade_url: "https://micropage.sh/pricing",
+    };
+    const fake = createFakeFetch({ status: 403, body });
+    const err = (await make(fake, { now: nowSec * 1000 })
+      .getAccessToken()
+      .catch((e: unknown) => e)) as MicropageError;
+    expect(err).toBeInstanceOf(MicropageError);
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.status).toBe(403);
+    expect(err.data).toEqual(body);
+    expect(err.message).toBe("Deploy tokens require the Pro+ plan. Upgrade at https://micropage.sh/pricing.");
+    expect(err.message).not.toMatch(/rejected|MICROPAGE_DEPLOY_TOKEN/);
+  });
+
+  it("still treats a bare 403 as an invalid token", async () => {
+    const fake = createFakeFetch({ status: 403, body: { error: "Token revoked" } });
+    await expect(make(fake, { now: nowSec * 1000 }).getAccessToken()).rejects.toMatchObject({
+      code: "DEPLOY_TOKEN_INVALID",
+      status: 403,
+    });
+  });
 });

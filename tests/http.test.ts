@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { MicropageError } from "../src/client/errors.js";
+import { MicropageError, planRequiredError } from "../src/client/errors.js";
 import { Http, eq, inList } from "../src/client/http.js";
+import { publishPost } from "../src/client/posts.js";
 import { VERSION } from "../src/version.js";
 import { FakeAuth, TEST_CONFIG, createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 
@@ -80,6 +81,35 @@ describe("Http errors", () => {
     expect(err.code).toBe("HTTP");
     expect(err.status).toBe(403);
     expect(err.message).toBe("POST /functions/v1/save-custom-domain failed (HTTP 403): Custom domains need a paid plan");
+  });
+
+  it("maps a plan_required body to PLAN_REQUIRED, keeping status and data", async () => {
+    const body = {
+      error: "Custom domains require the Pro plan.",
+      code: "plan_required",
+      required_tier: "pro",
+      upgrade_url: "https://micropage.sh/pricing",
+    };
+    const fake = createFakeFetch({ status: 403, body });
+    const err = (await makeHttp(fake).invoke("save-custom-domain", {}).catch((e: unknown) => e)) as MicropageError;
+    expect(err).toBeInstanceOf(MicropageError);
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.status).toBe(403);
+    expect(err.data).toEqual(body);
+    expect(err.message).toBe("Custom domains require the Pro plan. Upgrade at https://micropage.sh/pricing.");
+  });
+
+  it("maps a 402 plan_required too", async () => {
+    const fake = createFakeFetch({ status: 402, body: { error: "Nope", code: "plan_required", required_tier: "pro_plus", upgrade_url: "https://x.test/up" } });
+    const err = (await makeHttp(fake).invoke("x").catch((e: unknown) => e)) as MicropageError;
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.status).toBe(402);
+    expect(err.message).toBe("Nope. Upgrade at https://x.test/up.");
+  });
+
+  it("leaves a bare 403 as HTTP", async () => {
+    const fake = createFakeFetch({ status: 403, body: { error: "Forbidden", code: "something_else" } });
+    await expect(makeHttp(fake).invoke("x")).rejects.toMatchObject({ code: "HTTP", status: 403 });
   });
 
   it("maps a timeout to a TIMEOUT error", async () => {
@@ -183,5 +213,41 @@ describe("Http.count", () => {
   it("reports HTTP errors", async () => {
     const err = await makeHttp(createFakeFetch({ status: 500, body: { message: "boom" } })).count("forms").catch((e: unknown) => e);
     expect((err as MicropageError).status).toBe(500);
+  });
+});
+
+describe("planRequiredError", () => {
+  it("is null for bodies without code plan_required", () => {
+    expect(planRequiredError(null)).toBeNull();
+    expect(planRequiredError("plan_required")).toBeNull();
+    expect(planRequiredError({ error: "x" })).toBeNull();
+  });
+
+  it("falls back to the tier and the pricing page when the body is sparse", () => {
+    expect(planRequiredError({ code: "plan_required", required_tier: "pro_plus" })?.message).toBe(
+      "This needs the Pro+ plan. Upgrade at https://micropage.sh/pricing.",
+    );
+    expect(planRequiredError({ code: "plan_required" })?.message).toBe(
+      "This needs a higher micropage plan. Upgrade at https://micropage.sh/pricing.",
+    );
+  });
+});
+
+describe("publishPost plan refusals", () => {
+  it("reports plan_required as PLAN_REQUIRED with the post-state note", async () => {
+    const fake = createFakeFetch({
+      status: 402,
+      body: { error: "Newsletter sends require a Pro plan.", code: "plan_required", required_tier: "pro", upgrade_url: "https://micropage.sh/pricing" },
+    });
+    const err = (await publishPost(makeHttp(fake), 7, "hello").catch((e: unknown) => e)) as MicropageError;
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.status).toBe(402);
+    expect(err.message).toMatch(/Newsletter sends require a Pro plan\. Upgrade at https:\/\/micropage\.sh\/pricing\./);
+    expect(err.message).toMatch(/check with list_posts/);
+  });
+
+  it("keeps PLAN_LIMIT for a bare 402 (monthly send limit)", async () => {
+    const fake = createFakeFetch({ status: 402, body: { error: "Monthly newsletter send limit of 1000 reached for your plan." } });
+    await expect(publishPost(makeHttp(fake), 7, "hello")).rejects.toMatchObject({ code: "PLAN_LIMIT", status: 402 });
   });
 });

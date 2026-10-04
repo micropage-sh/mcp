@@ -1,11 +1,11 @@
 import type { AuthProvider } from "./auth-provider.js";
-import { MicropageError } from "./errors.js";
+import { MicropageError, PRICING_URL } from "./errors.js";
 import { eq, type Http } from "./http.js";
 import { decodeJwtClaims } from "./jwt.js";
 
-export type PlanTier = "free" | "pro" | "pro_plus";
+export { PRICING_URL };
 
-export const PRICING_URL = "https://micropage.sh/pricing";
+export type PlanTier = "free" | "pro" | "pro_plus";
 
 /** Same wording as the CLI (cli/src/plan.js), addressed to the model. */
 export const UPGRADE_MESSAGE =
@@ -79,8 +79,10 @@ export class PlanGate {
 
   /**
    * Throws PLAN_REQUIRED unless the account is pro or pro_plus. Deploy-token
-   * mode skips the lookup: deploy tokens can only be created on Pro+
-   * (create-deploy-token), so holding one already implies a paid plan.
+   * mode skips the lookup: exchange-deploy-token refuses the exchange with
+   * `plan_required` unless the token owner is Pro+ at that moment, so a
+   * working deploy-token session already implies a paid plan (and a downgrade
+   * takes effect at the next exchange).
    */
   async requirePaidPlan(): Promise<void> {
     if (this.auth.mode === "deploy_token") return;
