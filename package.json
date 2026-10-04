@@ -1,0 +1,62 @@
+{
+  "name": "@micropage-sh/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for micropage.sh: let an AI assistant create, edit and publish micropages from markup.",
+  "mcpName": "io.github.micropage-sh/mcp",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "micropage-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke.ts",
+    "inspect": "npx -y @modelcontextprotocol/inspector tsx src/index.ts",
+    "check": "node scripts/check-publishable.mjs",
+    "prepublishOnly": "npm run build && node scripts/check-publishable.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "modelcontextprotocol",
+    "ai",
+    "agent",
+    "claude",
+    "micropage",
+    "static-site",
+    "landing-page"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/micropage-sh/mcp.git"
+  },
+  "homepage": "https://docs.micropage.sh",
+  "bugs": {
+    "url": "https://github.com/micropage-sh/mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.0",
+    "@types/node": "^24.19.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
