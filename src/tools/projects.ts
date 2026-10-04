@@ -1,8 +1,11 @@
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult, InputRequiredResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import * as z from "zod";
 
-import { RO } from "../annotations.js";
+import { OUT, RO, WRITE } from "../annotations.js";
+import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type SaveDraftResult } from "../client/builds.js";
+import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
+import { concatPages } from "../client/pages.js";
 import {
   PROJECT_COLUMNS,
   ProjectRef,
@@ -11,7 +14,9 @@ import {
   type Project,
   type ProjectRow,
 } from "../client/project-ref.js";
+import { EXAMPLES } from "../content/index.js";
 import type { ToolContext } from "../context.js";
+import { elicitConfirmation, requireConfirmMatch } from "../guards.js";
 import { BUILD_SUMMARY_COLUMNS, BuildSummary, ProjectSummary, gateTool, structuredResult } from "./shared.js";
 
 // ---------------------------------------------------------------------------
@@ -170,6 +175,395 @@ export async function runGetProject(ctx: ToolContext, args: z.infer<typeof GetPr
 }
 
 // ---------------------------------------------------------------------------
+// get_page_source
+// ---------------------------------------------------------------------------
+
+export const GetPageSourceInput = z
+  .object({
+    project: ProjectRef,
+    version: BuildRefInput.optional().describe(
+      "Which build's source to read: a build number (\"v12\" or 12) or id (\"id:4567\"). Defaults to the active " +
+        "build (the draft or published build the editor and CLI work on), else the latest build.",
+    ),
+  })
+  .strict();
+
+export const GetPageSourceOutput = z.object({
+  project: ProjectSummary,
+  build: z
+    .object({
+      id: z.number(),
+      number: z.number().nullable(),
+      status: z.string().nullable(),
+      updated_at: z.string().nullable(),
+      is_active: z.boolean().describe("True when this is the project's active build."),
+    })
+    .nullable()
+    .describe("Null when the project has no builds yet."),
+  source: z
+    .string()
+    .nullable()
+    .describe("The raw .page markup. Several files were merged into one when saved; edit it as landing.page."),
+  llms_txt: z.string().nullable().describe("The site's /llms.txt as stored on this build, if any."),
+  assets: z
+    .array(z.string())
+    .nullable()
+    .describe("Filenames uploaded to the project, usable as `img: <- filename`. Null if the list could not be read."),
+});
+export type GetPageSourceResult = z.infer<typeof GetPageSourceOutput>;
+
+interface SourceBuildRow {
+  id: number;
+  number: number | null;
+  status: string | null;
+  updated_at: string | null;
+  raw_content: string | null;
+  llms_txt: string | null;
+}
+
+const SOURCE_COLUMNS = "id,number,status,updated_at,raw_content,llms_txt:json_content->site->>llms_txt";
+
+async function listAssetNames(ctx: ToolContext, projectId: number): Promise<string[] | null> {
+  try {
+    const data = await ctx.http.invokeGet<{ files?: Array<{ filename?: unknown }> } | null>("list-files", {
+      project_id: String(projectId),
+    });
+    const names = (data?.files ?? []).map((f) => f.filename).filter((n): n is string => typeof n === "string" && n !== "");
+    return [...new Set(names)].sort();
+  } catch {
+    // The file list is a convenience here; list_files reports its own errors.
+    return null;
+  }
+}
+
+export async function runGetPageSource(
+  ctx: ToolContext,
+  args: z.infer<typeof GetPageSourceInput>,
+): Promise<GetPageSourceResult> {
+  await gateTool(ctx, "get_page_source");
+  const project = await resolveProject(ctx, args.project);
+
+  let build: SourceBuildRow | null;
+  if (args.version !== undefined) {
+    build = await findBuild<SourceBuildRow>(ctx.http, project.id, parseBuildRef(args.version), SOURCE_COLUMNS);
+  } else {
+    build =
+      project.active_build_id === null
+        ? null
+        : await getBuildById<SourceBuildRow>(ctx.http, project.id, project.active_build_id, SOURCE_COLUMNS);
+    build ??= await ctx.http.selectOne<SourceBuildRow>("builds", {
+      select: SOURCE_COLUMNS,
+      filters: { project_id: eq(project.id) },
+      order: "number.desc",
+    });
+  }
+
+  const assets = await listAssetNames(ctx, project.id);
+  return {
+    project: summarize(project),
+    build: build
+      ? {
+          id: build.id,
+          number: build.number ?? null,
+          status: build.status ?? null,
+          updated_at: build.updated_at ?? null,
+          is_active: build.id === project.active_build_id,
+        }
+      : null,
+    source: build?.raw_content ?? null,
+    llms_txt: build?.llms_txt ?? null,
+    assets,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// create_project
+// ---------------------------------------------------------------------------
+
+/** Full-page example handed out as the starter (components-* files are fragments). */
+export const STARTER_EXAMPLE = "startup-landing";
+
+const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,56}[a-z0-9])?$/;
+
+export const CreateProjectInput = z
+  .object({
+    name: z.string().trim().min(1).max(100).describe("Project name shown in the editor, e.g. \"Acme waitlist\"."),
+    domain: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .max(80)
+      .optional()
+      .describe(
+        "Optional micropage subdomain: \"acme\" serves at https://acme.micropage.sh. Lowercase letters, digits and " +
+          "hyphens, up to 58 characters. Omit it to get one derived from the name plus a short random suffix.",
+      ),
+  })
+  .strict();
+
+export const CreateProjectOutput = z.object({
+  project: ProjectSummary,
+  starter: z.object({
+    example: z.string().describe("Which bundled example the starter source is."),
+    source: z.string().describe("A complete .page file to adapt and pass to save_page as landing.page."),
+    referenced_files: z
+      .array(z.string())
+      .describe("Files the starter references with `<-`; upload them with upload_asset or remove those lines."),
+    other_examples: z.array(z.string()).describe("More examples, readable with get_markup_reference."),
+  }),
+  next_steps: z.string(),
+});
+export type CreateProjectResult = z.infer<typeof CreateProjectOutput>;
+
+export function normalizeDomain(input: string, baseDomain: string): string {
+  let d = input.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const suffix = `.${baseDomain.toLowerCase()}`;
+  if (d.endsWith(suffix)) d = d.slice(0, -suffix.length);
+  if (!DOMAIN_RE.test(d)) {
+    throw new MicropageError(
+      "INVALID_DOMAIN",
+      `"${input}" is not a valid micropage subdomain. Use 1-58 lowercase letters, digits and hyphens, not starting or ` +
+        `ending with a hyphen (e.g. "acme-launch"), or omit domain to get one from the name. Nothing was created.`,
+    );
+  }
+  return d;
+}
+
+function referencedFiles(source: string): string[] {
+  const out = new Set<string>();
+  for (const m of source.matchAll(/<-\s*([^\s<>]+\.[A-Za-z0-9]{1,8})\s*$/gm)) {
+    if (!/^https?:/i.test(m[1]!)) out.add(m[1]!);
+  }
+  return [...out].sort();
+}
+
+export async function runCreateProject(
+  ctx: ToolContext,
+  args: z.infer<typeof CreateProjectInput>,
+): Promise<CreateProjectResult> {
+  const domain = args.domain ? normalizeDomain(args.domain, ctx.config.baseDomain) : undefined;
+  await gateTool(ctx, "create_project");
+
+  let rows: ProjectRow[];
+  try {
+    rows = await ctx.http.insert<ProjectRow>("projects", { name: args.name, ...(domain ? { domain } : {}) });
+  } catch (err) {
+    if (err instanceof MicropageError && err.status === 409) {
+      throw new MicropageError(
+        "DOMAIN_TAKEN",
+        `The subdomain "${domain ?? "(generated)"}" is already taken. Pick another domain, or omit it. Nothing was created.`,
+        { status: 409, data: err.data, cause: err },
+      );
+    }
+    if (err instanceof MicropageError && (err.status === 403 || err.status === 401)) {
+      throw new MicropageError(
+        "PROJECT_LIMIT",
+        "micropage refused to create another project, most likely because the account is at its plan's project " +
+          "limit (Pro: 5, Pro+: 20). Tell the user to delete an unused project or upgrade. Nothing was created.",
+        { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
+      );
+    }
+    throw err;
+  }
+  const row = rows[0];
+  if (!row) throw new MicropageError("CREATE_FAILED", "Creating the project returned no row. Call list_projects to check, then retry.");
+
+  const project = toProject(
+    {
+      id: row.id,
+      uuid: row.uuid,
+      name: row.name ?? args.name,
+      domain: row.domain ?? null,
+      custom_domain: row.custom_domain ?? null,
+      active_build_id: row.active_build_id ?? null,
+      status: row.status ?? null,
+      created_at: row.created_at ?? null,
+    },
+    ctx.config,
+  );
+  const source = EXAMPLES[STARTER_EXAMPLE] ?? Object.values(EXAMPLES)[0] ?? "";
+  return {
+    project: summarize(project),
+    starter: {
+      example: STARTER_EXAMPLE,
+      source,
+      referenced_files: referencedFiles(source),
+      other_examples: Object.keys(EXAMPLES).filter((n) => n !== STARTER_EXAMPLE && !n.startsWith("components-")),
+    },
+    next_steps:
+      "The project is empty and nothing is live yet. Rewrite the starter for the user's brief, call save_page with " +
+      "pages: [{ name: \"landing.page\", content }], show the user the editor_url to preview, and call publish_build " +
+      "only when the user asks to go live.",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// save_page
+// ---------------------------------------------------------------------------
+
+export const MAX_PAGE_FILES = 50;
+
+export const SavePageInput = z
+  .object({
+    project: ProjectRef,
+    pages: z
+      .array(
+        z
+          .object({
+            name: z
+              .string()
+              .trim()
+              .min(1)
+              .max(100)
+              .describe("File name ending in .page. landing.page is merged first; the rest follow sorted by name."),
+            content: z.string().describe("The complete .page markup of this file (not a diff)."),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(MAX_PAGE_FILES)
+      .describe(
+        "The whole site source as one or more .page files, merged like the CLI does (landing.page first, then the " +
+          "others by name, a blank line between). Pass every file each time: this replaces the source, it does not patch it.",
+      ),
+    llms_txt: z
+      .string()
+      .optional()
+      .describe(
+        "The site's /llms.txt, stored verbatim. Omit to keep the current build's llms.txt; pass an empty string to remove it.",
+      ),
+  })
+  .strict();
+
+export const SavePageOutput = z.object({
+  project: ProjectSummary,
+  build: z.object({
+    id: z.number().describe("Build id; pass it to publish_build as build \"id:<id>\" to publish exactly this draft."),
+    number: z.number().nullable(),
+    status: z.string().nullable(),
+  }),
+  action: z
+    .enum(["updated_draft", "created_draft"])
+    .describe("updated_draft: the active draft (or failed build) was overwritten. created_draft: a new draft was made active."),
+  previous_active_build_id: z.number().nullable(),
+  issues: z
+    .array(z.string())
+    .describe("Problems the compiler flagged, e.g. a referenced file that does not exist. Fix them before publishing."),
+  page_count: z.number(),
+  llms_txt: z.enum(["kept", "set", "removed", "none"]),
+  live: z.literal(false).describe("Always false: save_page never changes the live site."),
+  preview_url: z.string().describe("Where the user can preview this draft: the project in the micropage editor."),
+  live_url: z.string().nullable().describe("The public URL; it still shows the last published build."),
+  next: z.string(),
+});
+export type SavePageResult = z.infer<typeof SavePageOutput>;
+
+export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePageInput>): Promise<SavePageResult> {
+  const text = concatPages(args.pages);
+  await gateTool(ctx, "save_page");
+  const project = await resolveProject(ctx, args.project);
+
+  const saved: SaveDraftResult = await saveDraft(ctx.http, ctx.config, {
+    projectId: project.id,
+    activeBuildId: project.active_build_id,
+    text,
+    llmsTxt: args.llms_txt,
+  });
+
+  return {
+    project: summarize({ ...project, active_build_id: saved.build.id }),
+    build: saved.build,
+    action: saved.action,
+    previous_active_build_id: saved.previous_active_build_id,
+    issues: saved.issues,
+    page_count: saved.page_count,
+    llms_txt: saved.llms_txt,
+    live: false,
+    preview_url: project.editor_url,
+    live_url: project.live_url,
+    next:
+      "Saved as a draft: it never goes live on its own. Show the user the preview_url" +
+      (saved.issues.length > 0 ? " and fix the issues listed" : "") +
+      `, and call publish_build (build "id:${saved.build.id}", confirm: true) only when the user asks to publish.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// delete_project (registered only with MICROPAGE_MCP_ALLOW_DELETE=1)
+// ---------------------------------------------------------------------------
+
+export const DeleteProjectInput = z
+  .object({
+    project: ProjectRef,
+    confirm_domain: z
+      .string()
+      .trim()
+      .max(300)
+      .optional()
+      .describe(
+        "The project's micropage domain, typed back to confirm (e.g. \"acme-3f9a1c\" or \"acme-3f9a1c.micropage.sh\"). " +
+          "Ask the user to confirm the deletion first; get_project shows the domain.",
+      ),
+  })
+  .strict();
+
+export const DeleteProjectOutput = z.object({
+  deleted: z.boolean(),
+  already_removed: z.boolean(),
+  project_id: z.number(),
+  uuid: z.string(),
+  domain: z.string().nullable(),
+  note: z.string(),
+});
+export type DeleteProjectResult = z.infer<typeof DeleteProjectOutput>;
+
+export const DELETE_ELICIT_KEY = "confirm_delete_project";
+
+export async function runDeleteProject(
+  ctx: ToolContext,
+  args: z.infer<typeof DeleteProjectInput>,
+  handlerCtx: ServerContext,
+): Promise<DeleteProjectResult | InputRequiredResult> {
+  await gateTool(ctx, "delete_project");
+  const project = await resolveProject(ctx, args.project);
+  const expected = project.domain ?? project.uuid;
+  const suffix = `.${ctx.config.baseDomain.toLowerCase()}`;
+  const given = args.confirm_domain?.toLowerCase().endsWith(suffix)
+    ? args.confirm_domain.slice(0, -suffix.length)
+    : args.confirm_domain;
+  requireConfirmMatch(given, expected, "confirm_domain", `Deleting project "${project.name ?? expected}"`);
+
+  const outcome = elicitConfirmation(handlerCtx, ctx.clientCapabilities(handlerCtx), {
+    key: DELETE_ELICIT_KEY,
+    message:
+      `Permanently delete the micropage project "${project.name ?? expected}" (${project.live_url ?? expected})? ` +
+      "Its site goes offline and the project and its builds are removed. This cannot be undone.",
+  });
+  if (outcome.status === "pending") return outcome.result;
+  if (outcome.status === "declined") {
+    throw new MicropageError("DECLINED", "The user declined the deletion in the confirmation prompt. Nothing was deleted.");
+  }
+
+  let alreadyRemoved = false;
+  try {
+    await ctx.http.invoke("delete-project", { projectId: project.id });
+  } catch (err) {
+    if (err instanceof MicropageError && err.status === 404) alreadyRemoved = true;
+    else throw err;
+  }
+  return {
+    deleted: true,
+    already_removed: alreadyRemoved,
+    project_id: project.id,
+    uuid: project.uuid,
+    domain: project.domain,
+    note: alreadyRemoved
+      ? "The project was already removed on the server."
+      : "Deletion started. The site, its Cloudflare Pages project and DNS are cleaned up in the background over the next minutes.",
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 export function registerProjectTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
@@ -210,4 +604,92 @@ It does not return the page source (use get_page_source) or follow a deploy in p
       return structuredResult(result, `${p.name ?? p.uuid}: ${p.live_url ?? "no live URL yet"}.`);
     },
   );
+
+  server.registerTool(
+    "get_page_source",
+    {
+      title: "Read a project's .page source",
+      description: `Return the raw .page markup of a micropage project's active build (or of a given build number), plus its stored llms.txt and the filenames uploaded to the project.
+
+Call it before editing an existing site: change the returned source and send the whole file back with save_page as landing.page. Pass \`version\` to read an older build, e.g. to restore it. The source was merged from all .page files when saved, so it comes back as one file.
+
+Read-only; it does not show what is live (get_project tells you which build is deployed) and does not download images.`,
+      inputSchema: GetPageSourceInput,
+      outputSchema: GetPageSourceOutput,
+      annotations: RO,
+    },
+    async (args) => {
+      const result = await runGetPageSource(ctx, args);
+      const b = result.build;
+      return structuredResult(
+        result,
+        b ? `Source of build v${b.number ?? "?"} (${b.status ?? "unknown"}${b.is_active ? ", active" : ""}).` : "This project has no builds yet.",
+      );
+    },
+  );
+
+  server.registerTool(
+    "create_project",
+    {
+      title: "Create a micropage project",
+      description: `Create a new, empty micropage project in the signed-in account and return it together with a complete starter .page file (one of the bundled examples) to adapt.
+
+Use it when the user wants a new site. Each call creates another project and counts against the plan's project limit (Pro: 5, Pro+: 20), so check list_projects first when the user may mean an existing site. Nothing is published: write the page, call save_page, and publish only on request.
+
+It does not write local files (it is not \`micropage projects create\`) and cannot set a custom domain; that is done in the editor.`,
+      inputSchema: CreateProjectInput,
+      outputSchema: CreateProjectOutput,
+      annotations: WRITE,
+    },
+    async (args) => {
+      const result = await runCreateProject(ctx, args);
+      return structuredResult(result, `Created ${result.project.name ?? result.project.uuid} (${result.project.domain ?? "no domain"}). Not live yet.`);
+    },
+  );
+
+  server.registerTool(
+    "save_page",
+    {
+      title: "Save .page source as a draft",
+      description: `Compile .page markup and save it as the project's draft build. It never goes live: call publish_build to deploy, and only when the user asks.
+
+Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file) and the editor URL where the user can preview the draft; drafts have no public URL.
+
+Images are not uploaded here: call upload_asset first, then reference the file with \`img: <- filename\`. Call get_markup_reference before writing markup you are unsure of. Saving also registers the source's forms on the project.`,
+      inputSchema: SavePageInput,
+      outputSchema: SavePageOutput,
+      annotations: WRITE,
+    },
+    async (args) => {
+      const result = await runSavePage(ctx, args);
+      const verb = result.action === "updated_draft" ? "Updated" : "Created";
+      return structuredResult(
+        result,
+        `${verb} draft v${result.build.number ?? "?"} (id ${result.build.id}); not live.` +
+          (result.issues.length > 0 ? ` ${result.issues.length} issue(s) to fix.` : ""),
+      );
+    },
+  );
+
+  if (ctx.flags.allowDelete) {
+    server.registerTool(
+      "delete_project",
+      {
+        title: "Delete a micropage project",
+        description: `Permanently delete a micropage project: its live site goes offline, and its Cloudflare Pages project, DNS record and the project record with its builds are removed. It cannot be undone.
+
+Only call it when the user explicitly asks to delete this specific project. Pass \`confirm_domain\` with the project's micropage domain (from get_project) after the user has confirmed; a mismatch is refused without changing anything. Clients that support it also show the user a confirmation prompt, and declining aborts.
+
+Never use it to "reset" a site; save_page and publish_build replace the content instead. Available only because MICROPAGE_MCP_ALLOW_DELETE is set.`,
+        inputSchema: DeleteProjectInput,
+        outputSchema: DeleteProjectOutput,
+        annotations: OUT,
+      },
+      async (args, handlerCtx): Promise<CallToolResult | InputRequiredResult> => {
+        const result = await runDeleteProject(ctx, args, handlerCtx);
+        if (!("deleted" in result)) return result;
+        return structuredResult(result, `Deleted ${result.domain ?? result.uuid}.`);
+      },
+    );
+  }
 }

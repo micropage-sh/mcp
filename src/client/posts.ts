@@ -313,16 +313,6 @@ export async function deletePost(http: Http, projectId: number, slug: string): P
   return http.invoke("delete-post", { project_id: projectId, slug });
 }
 
-/** Highest build_deploy_events id for a build, for get_deploy_status's after_event_id. */
-export async function latestDeployEventId(http: Http, buildId: number): Promise<number> {
-  const row = await http.selectOne<{ id: number }>("build_deploy_events", {
-    select: "id",
-    filters: { build_id: eq(buildId) },
-    order: "id.desc",
-  });
-  return row?.id ?? 0;
-}
-
 function serverMessage(err: MicropageError): string | null {
   const data = err.data as { error?: unknown; message?: unknown } | null | undefined;
   const msg = data?.error ?? data?.message;

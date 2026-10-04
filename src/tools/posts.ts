@@ -9,7 +9,6 @@ import {
   deletePost,
   formNamesById,
   getPostBySlug,
-  latestDeployEventId,
   listPosts,
   postContentFingerprint,
   postNotFound,
@@ -25,6 +24,7 @@ import {
   type PostRow,
   type UpsertPostPayload,
 } from "../client/posts.js";
+import { getMaxDeployEventId } from "../client/deploy-events.js";
 import { ProjectRef, resolveProject, type Project } from "../client/project-ref.js";
 import type { ToolContext } from "../context.js";
 import {
@@ -510,7 +510,7 @@ export async function runPublishPost(
   const rebuilds = post.web_visibility !== "none" && project.active_build_id !== null;
   let afterEventId: number | null = null;
   if (rebuilds) {
-    afterEventId = await latestDeployEventId(ctx.http, project.active_build_id!).catch(() => null);
+    afterEventId = await getMaxDeployEventId(ctx.http, project.active_build_id!).catch(() => null);
   }
 
   const res = await publishPost(ctx.http, project.id, post.slug!);

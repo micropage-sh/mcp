@@ -27,7 +27,7 @@ export function structuredResult<T extends Record<string, unknown>>(data: T, sum
 export const BuildSummary = z.object({
   id: z.number(),
   number: z.number().nullable(),
-  status: z.string().nullable().describe("draft, publishing, processing, deployed or failed."),
+  status: z.string().nullable().describe("draft, in_progress, publishing, deployed or failed."),
   updated_at: z.string().nullable(),
   failure_reason: z.string().nullable(),
 });
