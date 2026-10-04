@@ -85,6 +85,22 @@ export async function getMaxDeployEventId(http: Http, buildId: number): Promise<
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Highest build_deploy_events.id across the project, 0 when none. Taken
+ * before a post change, when the build the server will rebuild is not known
+ * yet: event ids are global and polling filters by build, so any later event
+ * of whichever build gets rebuilt lands after it.
+ */
+export async function getMaxProjectDeployEventId(http: Http, projectId: number): Promise<number> {
+  const row = await http.selectOne<{ id: number | string }>("build_deploy_events", {
+    select: "id",
+    filters: { project_id: eq(projectId) },
+    order: "id.desc",
+  });
+  const n = Number(row?.id);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** created_at of the build's newest deploy event, null when it has none. */
 export async function getLatestDeployEventAt(http: Http, buildId: number): Promise<string | null> {
   const row = await http.selectOne<{ created_at: string | null }>("build_deploy_events", {

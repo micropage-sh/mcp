@@ -334,7 +334,7 @@ describe("save_page", () => {
       action: "updated_draft",
       live: false,
       preview_url: "https://app.micropage.sh/editor/7",
-      next: expect.stringMatching(/does not go live by itself.*allow_draft_deploy.*publish_build/),
+      next: expect.stringMatching(/never goes live until publish_build/),
     });
   });
 

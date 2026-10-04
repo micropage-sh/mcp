@@ -451,13 +451,7 @@ export const SavePageOutput = z.object({
     .describe("Problems the compiler flagged, e.g. a referenced file that does not exist. Fix them before publishing."),
   page_count: z.number(),
   llms_txt: z.enum(["kept", "set", "removed", "none"]),
-  live: z
-    .literal(false)
-    .describe(
-      "Always false: saving does not deploy, and the draft does not go live by itself. But publishing, editing a published, " +
-        "unpublishing or deleting a post currently redeploys the project's active build, which is now this draft (backlog TASK-54); " +
-        "the post tools refuse that unless allow_draft_deploy is passed.",
-    ),
+  live: z.literal(false).describe("Always false: save_page never changes the live site; the draft goes live only with publish_build."),
   preview_url: z.string().describe("Where the user can preview this draft: the project in the micropage editor."),
   live_url: z.string().nullable().describe("The public URL; it still shows the last published build."),
   next: z.string(),
@@ -488,9 +482,7 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
     preview_url: project.editor_url,
     live_url: project.live_url,
     next:
-      "Saved as a draft; it does not go live by itself. It is now the active build, so a post publish, edit of a published post, " +
-      "unpublish or delete would deploy it with the site rebuild (the post tools refuse that unless allow_draft_deploy is passed). " +
-      "Show the user the preview_url" +
+      "Saved as a draft: it never goes live until publish_build. Show the user the preview_url" +
       (saved.issues.length > 0 ? " and fix the issues listed" : "") +
       `, and call publish_build (build "id:${saved.build.id}", confirm: true) only when the user asks to publish.`,
   };
@@ -669,7 +661,7 @@ It does not write local files (it is not \`micropage projects create\`) and cann
     "save_page",
     {
       title: "Save .page source as a draft",
-      description: `Compile .page markup and save it as the project's draft build. The draft does not go live by itself: call publish_build to deploy, and only when the user asks. Caveat (backlog TASK-54): the draft becomes the active build, and publishing, editing a published, unpublishing or deleting a post currently redeploys the active build, so those would put this draft live; the post tools refuse that unless allow_draft_deploy: true is passed.
+      description: `Compile .page markup and save it as the project's draft build. It never goes live until publish_build deploys it: call publish_build only when the user asks. Post changes rebuild the live site, not this draft.
 
 Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file) and the editor URL where the user can preview the draft; drafts have no public URL.
 

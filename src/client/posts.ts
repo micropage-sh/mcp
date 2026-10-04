@@ -226,7 +226,16 @@ export interface UpsertPostPayload {
   preheader: string | null;
 }
 
-export interface UpsertPostResponse {
+/**
+ * The build a post change queued a site rebuild of: the live build, never a
+ * page draft. null when nothing was rebuilt. Absent from servers older than
+ * the live-build rebuild, which redeployed projects.active_build_id instead.
+ */
+export interface RebuildField {
+  rebuild_build_id?: number | null;
+}
+
+export interface UpsertPostResponse extends RebuildField {
   post_id: string;
   action: "created" | "updated";
   published: boolean;
@@ -248,7 +257,7 @@ export async function upsertPost(http: Http, payload: UpsertPostPayload): Promis
   }
 }
 
-export interface PublishPostResponse {
+export interface PublishPostResponse extends RebuildField {
   post_id: string;
   published_at: string;
   emailed: boolean;
@@ -274,7 +283,12 @@ export async function publishPost(http: Http, projectId: number, slug: string): 
   }
 }
 
-export async function unpublishPost(http: Http, projectId: number, slug: string): Promise<{ post_id: string; unpublished: boolean }> {
+export interface UnpublishPostResponse extends RebuildField {
+  post_id: string;
+  unpublished: boolean;
+}
+
+export async function unpublishPost(http: Http, projectId: number, slug: string): Promise<UnpublishPostResponse> {
   try {
     return await http.invoke("unpublish-post", { project_id: projectId, slug });
   } catch (err) {
@@ -283,7 +297,12 @@ export async function unpublishPost(http: Http, projectId: number, slug: string)
   }
 }
 
-export async function deletePost(http: Http, projectId: number, slug: string): Promise<{ deleted: boolean; slug: string | null }> {
+export interface DeletePostResponse extends RebuildField {
+  deleted: boolean;
+  slug: string | null;
+}
+
+export async function deletePost(http: Http, projectId: number, slug: string): Promise<DeletePostResponse> {
   return http.invoke("delete-post", { project_id: projectId, slug });
 }
 

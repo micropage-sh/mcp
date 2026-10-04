@@ -62,6 +62,8 @@ interface Backend {
   subscribers: number;
   activeBuildId: number | null;
   activeBuildStatus: string;
+  /** rebuild_build_id the post functions answer with; undefined leaves it out, like servers before it existed. */
+  rebuildBuildId?: number | null;
   files: Array<{ id: string; filename: string }>;
   upsert: (call: RecordedCall) => { status?: number; body: unknown };
 }
@@ -77,6 +79,10 @@ function backend(overrides: Partial<Backend> = {}): Backend {
     upsert: () => ({ body: { post_id: "post-new", action: "created", published: false } }),
     ...overrides,
   };
+}
+
+function rebuildField(b: Backend): { rebuild_build_id?: number | null } {
+  return b.rebuildBuildId === undefined ? {} : { rebuild_build_id: b.rebuildBuildId };
 }
 
 function serve(b: Backend): FakeFetch {
@@ -119,12 +125,12 @@ function serve(b: Backend): FakeFetch {
         const p = b.posts.find((x) => x.slug === (call.body as { slug: string }).slug)!;
         const emailed = p.email_enabled === true && p.form_id !== null;
         p.published_at ??= "2026-10-04T12:00:00Z";
-        return { body: { post_id: p.id, published_at: p.published_at, emailed, recipient_count: emailed ? b.subscribers : 0 } };
+        return { body: { post_id: p.id, published_at: p.published_at, emailed, recipient_count: emailed ? b.subscribers : 0, ...rebuildField(b) } };
       }
       case "/functions/v1/unpublish-post":
-        return { body: { post_id: "post-1", unpublished: true } };
+        return { body: { post_id: "post-1", unpublished: true, ...rebuildField(b) } };
       case "/functions/v1/delete-post":
-        return { body: { deleted: true, slug: (call.body as { slug: string }).slug } };
+        return { body: { deleted: true, slug: (call.body as { slug: string }).slug, ...rebuildField(b) } };
       default:
         throw new Error(`unexpected ${call.method} ${call.url}`);
     }
@@ -367,11 +373,12 @@ describe("preview_post_send + publish_post", () => {
     expect(mutatingCalls(fake)).toHaveLength(0);
   });
 
-  it("warns about a re-send and about a page draft that the rebuild would put live", async () => {
-    const b = backend({ posts: [post({ email_enabled: true, form_id: FORM_ID, published_at: "2026-10-01T00:00:00Z" })], activeBuildStatus: "draft" });
+  it("warns about a re-send", async () => {
+    const b = backend({ posts: [post({ email_enabled: true, form_id: FORM_ID, published_at: "2026-10-01T00:00:00Z" })] });
     const c = await connect(serve(b), { MICROPAGE_MCP_ALLOW_SEND: "1" });
     const p = await preview(c);
-    expect(p).toMatchObject({ already_published: true, resend_warning: expect.stringMatching(/RE-SENDS/), publish_allowed: true, site_warning: expect.stringMatching(/draft/) });
+    expect(p).toMatchObject({ already_published: true, resend_warning: expect.stringMatching(/RE-SENDS/), publish_allowed: true });
+    expect(p).not.toHaveProperty("site_warning");
   });
 
   it("publishes a web-only post with a fresh token and returns the deploy cursor", async () => {
@@ -503,104 +510,143 @@ describe("unpublish_post / delete_post", () => {
   }
 });
 
-describe("site rebuild with an unpublished page draft as the active build (TASK-54)", () => {
-  for (const status of ["draft", "failed"]) {
-    it(`upsert_post on a published post is refused while the active build is ${status}, then saves with allow_draft_deploy`, async () => {
-      const b = backend({
-        activeBuildStatus: status,
-        posts: [post({ published_at: "2026-10-01T00:00:00Z" })],
-        upsert: () => ({ body: { post_id: "post-1", action: "updated", published: true } }),
-      });
-      const fake = serve(b);
-      const c = await connect(fake);
-      const args = { project: "acme", title: "Hello", body_markdown: "New", confirm_live_update: true };
+describe("site rebuild target (server rebuild_build_id)", () => {
+  const cursorCalls = (fake: FakeFetch) => fake.calls.filter((call) => call.url.includes("/rest/v1/build_deploy_events"));
 
-      const refused = await c.callTool({ name: "upsert_post", arguments: args });
-      expect(refused.isError).toBe(true);
-      expect(text(refused)).toMatch(new RegExp(`unpublished page draft \\(build v6, status ${status}\\)[\\s\\S]*publish_build[\\s\\S]*allow_draft_deploy: true[\\s\\S]*Nothing was changed`));
-      expect(mutatingCalls(fake)).toHaveLength(0);
-
-      const ok = await c.callTool({ name: "upsert_post", arguments: { ...args, allow_draft_deploy: true } });
-      expect(ok.isError, text(ok)).toBeFalsy();
-      expect(ok.structuredContent).toMatchObject({ warnings: [expect.stringMatching(/build v6[\s\S]*goes live with this site rebuild/)] });
-      expect(mutatingCalls(fake)).toHaveLength(1);
-    });
-  }
-
-  it("upsert_post on a draft post is not affected (no rebuild)", async () => {
-    const fake = serve(backend({ activeBuildStatus: "draft" }));
-    const c = await connect(fake);
-    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
-    expect(res.isError, text(res)).toBeFalsy();
-    expect(fake.calls.some((call) => call.url.includes("/rest/v1/builds"))).toBe(false);
-  });
-
-  it("publish_post is refused before any publish call, then goes ahead with allow_draft_deploy", async () => {
-    const b = backend({ activeBuildStatus: "draft", posts: [post()] });
-    const fake = serve(b);
-    const c = await connect(fake);
-    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
-    const { confirmation_token, site_warning } = preview.structuredContent as { confirmation_token: string; site_warning: string };
-    expect(site_warning).toMatch(/build v6, status draft[\s\S]*allow_draft_deploy/);
-
-    const refused = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
-    expect(refused.isError).toBe(true);
-    expect(text(refused)).toMatch(/Publishing \\"hello\\" rebuilds the site[\s\S]*build v6/);
-    expect(mutatingCalls(fake)).toHaveLength(0);
-
-    const ok = await c.callTool({
-      name: "publish_post",
-      arguments: { project: "acme", slug: "hello", confirmation_token, allow_draft_deploy: true },
-    });
-    expect(ok.isError, text(ok)).toBeFalsy();
-    expect(ok.structuredContent).toMatchObject({ rebuild_queued: true, note: expect.stringMatching(/goes live with this site rebuild/) });
-    expect(callsTo(fake, "publish-post")).toHaveLength(1);
-  });
-
-  it("publish_post of a visibility none post needs no acknowledgement", async () => {
-    const b = backend({ activeBuildStatus: "draft", posts: [post({ web_visibility: "none" })] });
+  it("publish_post takes the project-scoped cursor before publishing and follows the server's rebuild_build_id", async () => {
+    // Active build 30 is a page draft; the server rebuilds live build 25 instead.
+    const b = backend({ activeBuildStatus: "draft", rebuildBuildId: 25, posts: [post()] });
     const fake = serve(b);
     const c = await connect(fake);
     const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
     const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
     const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
     expect(res.isError, text(res)).toBeFalsy();
-  });
-
-  for (const [tool, fn, verb] of [
-    ["unpublish_post", "unpublish-post", "Unpublishing"],
-    ["delete_post", "delete-post", "Deleting"],
-  ] as const) {
-    it(`${tool} is refused while the active build is a draft, then goes ahead with allow_draft_deploy`, async () => {
-      const b = backend({ activeBuildStatus: "draft", posts: [post({ published_at: "2026-10-01T00:00:00Z" })] });
-      const fake = serve(b);
-      const c = await connect(fake);
-      const refused = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
-      expect(refused.isError).toBe(true);
-      expect(text(refused)).toMatch(new RegExp(`${verb} \\\\"hello\\\\" rebuilds the site[\\s\\S]*build v6`));
-      expect(callsTo(fake, fn)).toHaveLength(0);
-
-      const ok = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true, allow_draft_deploy: true } });
-      expect(ok.isError, text(ok)).toBeFalsy();
-      expect(ok.structuredContent).toMatchObject({ rebuild_queued: true, site_warning: expect.stringMatching(/build v6/) });
-      expect(callsTo(fake, fn)).toHaveLength(1);
+    expect(res.structuredContent).toMatchObject({
+      rebuild_queued: true,
+      build_id: 25,
+      after_event_id: 77,
+      note: expect.stringMatching(/build "id:25", after_event_id 77/),
     });
 
-    it(`${tool} needs no acknowledgement when the active build is deployed`, async () => {
+    const cursors = cursorCalls(fake);
+    expect(cursors).toHaveLength(1);
+    const q = new URL(cursors[0]!.url).searchParams;
+    expect(q.get("project_id")).toBe("eq.7");
+    expect(q.get("build_id")).toBeNull();
+    expect(q.get("order")).toBe("id.desc");
+    expect(fake.calls.indexOf(cursors[0]!)).toBeLessThan(fake.calls.indexOf(callsTo(fake, "publish-post")[0]!));
+    expect(fake.calls.some((call) => call.url.includes("/rest/v1/builds"))).toBe(false);
+  });
+
+  it("publish_post reports no rebuild when the server queued none (rebuild_build_id null)", async () => {
+    const b = backend({ rebuildBuildId: null, posts: [post()] });
+    const c = await connect(serve(b));
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      rebuild_queued: false,
+      build_id: null,
+      after_event_id: null,
+      note: expect.stringMatching(/no published build yet[\s\S]*publish_build/),
+    });
+  });
+
+  it("publish_post falls back to the active build when the server leaves rebuild_build_id out", async () => {
+    const b = backend({ posts: [post()] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ rebuild_queued: true, build_id: 30, after_event_id: 77 });
+    expect(cursorCalls(fake)).toHaveLength(1);
+  });
+
+  it("publish_post of a visibility none post takes no cursor and queues no rebuild", async () => {
+    const b = backend({ posts: [post({ web_visibility: "none" })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const preview = await c.callTool({ name: "preview_post_send", arguments: { project: "acme", slug: "hello" } });
+    const { confirmation_token } = preview.structuredContent as { confirmation_token: string };
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ rebuild_queued: false, build_id: null, note: expect.stringMatching(/visibility none/) });
+    expect(cursorCalls(fake)).toHaveLength(0);
+  });
+
+  it("publish_post no longer accepts allow_draft_deploy", async () => {
+    const fake = serve(backend({ posts: [post()] }));
+    const c = await connect(fake);
+    const res = await c.callTool({
+      name: "publish_post",
+      arguments: { project: "acme", slug: "hello", confirmation_token: "abc.def", allow_draft_deploy: true },
+    });
+    expect(res.isError).toBe(true);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("upsert_post on a published post reports the server's rebuild build and cursor", async () => {
+    const b = backend({
+      activeBuildStatus: "draft",
+      posts: [post({ published_at: "2026-10-01T00:00:00Z" })],
+      upsert: () => ({ body: { post_id: "post-1", action: "updated", published: true, rebuild_build_id: 25 } }),
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({
+      name: "upsert_post",
+      arguments: { project: "acme", title: "Hello", body_markdown: "New", confirm_live_update: true },
+    });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ rebuild_queued: true, build_id: 25, after_event_id: 77, warnings: [] });
+  });
+
+  it("upsert_post on a draft post takes no cursor", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ rebuild_queued: false, build_id: null, after_event_id: null });
+    expect(cursorCalls(fake)).toHaveLength(0);
+  });
+
+  for (const [tool, fn] of [
+    ["unpublish_post", "unpublish-post"],
+    ["delete_post", "delete-post"],
+  ] as const) {
+    it(`${tool} takes the project cursor first and returns the server's rebuild_build_id`, async () => {
+      const fake = serve(backend({ activeBuildStatus: "draft", rebuildBuildId: 25, posts: [post({ published_at: "2026-10-01T00:00:00Z" })] }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(res.structuredContent).toMatchObject({ rebuild_queued: true, build_id: 25, after_event_id: 77 });
+      const cursors = cursorCalls(fake);
+      expect(cursors).toHaveLength(1);
+      expect(new URL(cursors[0]!.url).searchParams.get("project_id")).toBe("eq.7");
+      expect(fake.calls.indexOf(cursors[0]!)).toBeLessThan(fake.calls.indexOf(callsTo(fake, fn)[0]!));
+    });
+
+    it(`${tool} reports no rebuild when rebuild_build_id is null`, async () => {
+      const fake = serve(backend({ rebuildBuildId: null, posts: [post()] }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(res.structuredContent).toMatchObject({ rebuild_queued: false, build_id: null, after_event_id: null });
+    });
+
+    it(`${tool} falls back to the active build when rebuild_build_id is absent`, async () => {
       const fake = serve(backend({ posts: [post()] }));
       const c = await connect(fake);
       const res = await c.callTool({ name: tool, arguments: { project: "acme", slug: "hello", confirm: true } });
       expect(res.isError, text(res)).toBeFalsy();
-      expect(res.structuredContent).toMatchObject({ site_warning: null });
+      expect(res.structuredContent).toMatchObject({ rebuild_queued: true, build_id: 30, after_event_id: 77 });
+      expect(res.structuredContent).not.toHaveProperty("site_warning");
     });
   }
-
-  it("delete_post of a slug that does not exist is not blocked (nothing is rebuilt)", async () => {
-    const fake = serve(backend({ activeBuildStatus: "draft" }));
-    const c = await connect(fake);
-    const res = await c.callTool({ name: "delete_post", arguments: { project: "acme", slug: "ghost", confirm: true } });
-    expect(res.isError, text(res)).toBeFalsy();
-  });
 });
 
 describe("publish_post note", () => {
