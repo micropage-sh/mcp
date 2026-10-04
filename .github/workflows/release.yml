@@ -1,0 +1,103 @@
+name: Release
+
+# Publishes the package to npm and the server entry to the MCP registry in one
+# pass, so the two can never advertise different versions.
+#
+# Trigger: publish a GitHub release whose tag is v<version>, e.g. v0.1.1, cut
+# from the commit `npm version` made. package.json is the only place a version
+# is typed; `npm version` copies it into server.json (scripts/sync-version.mjs).
+#
+# Secrets required:
+#   NPM_TOKEN  npm automation (or granular) token with publish rights on the
+#              @micropage-sh scope.
+# The MCP registry needs no secret: the io.github.micropage-sh namespace is
+# proven with this workflow's GitHub OIDC token.
+#
+# `npm publish` runs prepublishOnly, which includes the strict content drift
+# check against docs.micropage.sh. Deploy the docs before releasing; see
+# PUBLISHING.md.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance and mcp-publisher login github-oidc
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check tag, package.json and server.json agree
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          srv=$(node -p "require('./server.json').version")
+          srvpkg=$(node -p "require('./server.json').packages.find((p) => p.identifier === require('./package.json').name).version")
+          echo "tag=$TAG package.json=$pkg server.json=$srv server.json/package=$srvpkg"
+          test "$pkg" = "$srv" && test "$pkg" = "$srvpkg" || {
+            echo "::error::package.json and server.json disagree on the version; run npm run sync-version"; exit 1; }
+          test "${TAG#v}" = "$pkg" || {
+            echo "::error::release tag $TAG does not match package.json version $pkg"; exit 1; }
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run check
+
+      - name: Download mcp-publisher (pinned, checksummed)
+        env:
+          # The registry's Go binary from its GitHub releases, not the npm
+          # package of the same name. Pinned because this step holds an OIDC
+          # token that can publish under our namespace. To upgrade, take the
+          # linux_amd64 hash from that release's registry_<version>_checksums.txt.
+          PUBLISHER_VERSION: v1.8.1
+          PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/publisher.tar.gz" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER_VERSION/mcp-publisher_linux_amd64.tar.gz"
+          echo "$PUBLISHER_SHA256  $RUNNER_TEMP/publisher.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+
+      # Before npm, so a server.json the registry would reject fails the
+      # release while nothing has been published yet.
+      - name: Validate server.json
+        run: '"$RUNNER_TEMP/mcp-publisher" validate'
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The registry checks that npm already serves this version, and npm
+      # accepts a publish some time before it serves it.
+      - name: Wait for npm to serve the version
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null "https://registry.npmjs.org/$name/$version" && exit 0
+            echo "waiting for npm to serve $name@$version ($i/60)"
+            sleep 10
+          done
+          echo "::error::npm still does not serve $name@$version after 10 minutes; publish the registry entry by hand (PUBLISHING.md, Recovery)"
+          exit 1
+
+      - name: Publish to the MCP registry
+        run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish

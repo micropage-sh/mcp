@@ -1,6 +1,7 @@
 /**
- * Publish guard. Two ways an npm-published MCP server ships broken (both
- * seen for real in the maproll server this one is modelled on):
+ * Publish guard. Runs in CI, on release and on prepublishOnly. Besides the
+ * server.json checks below, two ways an npm-published MCP server ships broken
+ * (both seen for real in the maproll server this one is modelled on):
  *
  *  - a `file:` dependency, which resolves to a path that exists only on the
  *    machine that published it, so `npx -y @micropage-sh/mcp` fails for everyone;
@@ -38,6 +39,36 @@ if (existsSync("package-lock.json")) {
   }
 }
 
+// The MCP registry rejects a server.json whose version disagrees with the npm
+// package, and one whose name differs from package.json's mcpName (that is
+// how it proves the npm package belongs to the listing). package.json is the
+// source; scripts/sync-version.mjs fixes a version mismatch.
+if (!existsSync("server.json")) {
+  problems.push(`server.json is missing — the MCP registry listing is generated from it.`);
+} else {
+  const srv = JSON.parse(readFileSync("server.json", "utf8"));
+  if (srv.name !== pkg.mcpName) {
+    problems.push(`server.json name "${srv.name}" differs from package.json mcpName "${pkg.mcpName}".`);
+  }
+  if (typeof srv.description !== "string" || srv.description.length > 100) {
+    problems.push(`server.json description must be a string of at most 100 characters (registry limit).`);
+  }
+  const versions = { "server.json version": srv.version };
+  const npmEntries = (srv.packages ?? []).filter((p) => p.registryType === "npm" && p.identifier === pkg.name);
+  if (npmEntries.length === 0) {
+    problems.push(`server.json has no npm package entry for "${pkg.name}".`);
+  }
+  npmEntries.forEach((p, i) => (versions[`server.json npm package [${i}] version`] = p.version));
+  for (const [where, v] of Object.entries(versions)) {
+    if (v !== pkg.version) {
+      problems.push(
+        `${where} is "${v}" but package.json is "${pkg.version}". ` +
+          `Run node scripts/sync-version.mjs (npm version does this for you).`
+      );
+    }
+  }
+}
+
 // Every emitted .js must trace back to a source file of the same name.
 if (existsSync("dist")) {
   const walk = (dir) =>
@@ -57,4 +88,4 @@ if (problems.length > 0) {
   console.error("Not publishable:\n" + problems.map((p) => `  - ${p}`).join("\n"));
   process.exit(1);
 }
-console.log("publishable: no local-path deps, no stale dist files");
+console.log("publishable: no local-path deps, server.json agrees with package.json, no stale dist files");

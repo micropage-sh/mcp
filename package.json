@@ -11,7 +11,8 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -26,7 +27,9 @@
     "check": "node scripts/check-publishable.mjs",
     "prepublishOnly": "npm run build && node scripts/check-publishable.mjs && node scripts/check-content-drift.mjs --strict",
     "sync-content": "node scripts/sync-content.mjs",
-    "check-content": "node scripts/check-content-drift.mjs"
+    "check-content": "node scripts/check-content-drift.mjs",
+    "sync-version": "node scripts/sync-version.mjs",
+    "version": "node scripts/sync-version.mjs && git add server.json"
   },
   "keywords": [
     "mcp",
@@ -43,7 +46,7 @@
     "type": "git",
     "url": "git+https://github.com/micropage-sh/mcp.git"
   },
-  "homepage": "https://docs.micropage.sh",
+  "homepage": "https://docs.micropage.sh/docs/mcp/overview/",
   "bugs": {
     "url": "https://github.com/micropage-sh/mcp/issues"
   },

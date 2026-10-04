@@ -1,0 +1,47 @@
+name: CI
+
+# The gates a release runs, on every push and PR, so a publish is never the
+# first place a broken build or a version mismatch shows up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      # vitest 5 requires Node 22.12+. The runtime supports Node 20 (engines),
+      # which the build and the smoke below still cover on that leg.
+      - if: matrix.node != 20
+        run: npm test
+
+      - run: npm run build
+      - run: npm run check
+
+      # Offline: an unroutable Supabase URL and an empty session dir, so the
+      # server must start and list everything without any account.
+      - name: Smoke (offline)
+        run: |
+          export MICROPAGE_CONFIG_DIR="$(mktemp -d)"
+          npm run smoke
+        env:
+          MICROPAGE_SUPABASE_URL: http://127.0.0.1:9
