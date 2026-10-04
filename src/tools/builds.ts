@@ -121,6 +121,9 @@ function classifyPublishFailure(err: unknown): PublishFailure {
   // Unknown wins: treating a maybe-queued publish as reverted invites a double publish.
   if (body.status_unknown === true) return "status_unknown";
   if (body.reverted === true) return "reverted";
+  // A 502 whose revert was skipped means something else (a job or another
+  // publish) moved the build meanwhile, so "nothing was published" can't be claimed.
+  if (body.reverted === false) return "status_unknown";
   return "other";
 }
 
