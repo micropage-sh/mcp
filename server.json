@@ -3,7 +3,7 @@
   "name": "io.github.micropage-sh/mcp",
   "title": "Micropage",
   "description": "Create, edit and publish micropage.sh landing pages and blog posts from markup.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://docs.micropage.sh/docs/mcp/overview/",
   "repository": {
     "url": "https://github.com/micropage-sh/mcp",
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@micropage-sh/mcp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },
