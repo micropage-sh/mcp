@@ -1,14 +1,28 @@
 # Publishing
 
 A release publishes two things from one GitHub release, through
-`.github/workflows/release.yml`:
+`.github/workflows/publish.yml`:
 
-- the npm package [`@micropage-sh/mcp`](https://www.npmjs.com/package/@micropage-sh/mcp), with provenance;
+- the npm package [`@micropage-sh/mcp`](https://www.npmjs.com/package/@micropage-sh/mcp), via npm trusted publishing (provenance is automatic);
 - the MCP Registry entry `io.github.micropage-sh/mcp`, generated from `server.json`.
 
-Nothing is published from a laptop. `npm publish` locally works (the
-`prepublishOnly` gates still run), but it skips provenance and the registry,
-so the two would drift apart.
+After the first version, nothing is published from a laptop: a local
+`npm publish` skips provenance and the registry, so the two would drift apart.
+
+## First publish (by hand, once)
+
+npm trusted publishing can only be configured for a package that already
+exists, so the first version goes out manually:
+
+1. Deploy the docs and run `npm run check-content` (see Release order).
+2. `npm login`, then `npm publish --access public` from a clean checkout of
+   the release commit (`prepublishOnly` runs all the gates).
+3. Publish the registry entry by hand: `mcp-publisher login github`, then
+   `mcp-publisher publish` (see Recovery for the binary).
+4. On npmjs.com, package settings for `@micropage-sh/mcp`, add a trusted
+   publisher: GitHub Actions, organization `micropage-sh`, repository `mcp`,
+   workflow `publish.yml`. Then set publishing access to require trusted
+   publishing and disallow tokens.
 
 ## Prerequisites (one-time)
 
@@ -16,11 +30,11 @@ so the two would drift apart.
   registry namespace `io.github.micropage-sh` is proven with the release
   workflow's GitHub OIDC token, so the repo must live under the
   `micropage-sh` org. No DNS record is needed.
-- **`NPM_TOKEN` repository secret**: an npm automation token, or a granular
-  token with read and write on `@micropage-sh/mcp` (or the whole scope). It
-  must bypass 2FA, because CI cannot answer an OTP prompt.
-- **npm org access for `@micropage-sh`**: the account that owns the token is a
-  member of the `micropage-sh` npm org with publish rights. The first publish
+- **npm trusted publisher** for `@micropage-sh/mcp` pointing at workflow
+  `publish.yml` (see First publish). No `NPM_TOKEN` secret is used; the
+  workflow upgrades npm to >= 11.5.1, which trusted publishing requires.
+- **npm org access for `@micropage-sh`**: the account doing the first publish
+  is a member of the `micropage-sh` npm org with publish rights. The first publish
   of a scoped package needs `--access public`, which the workflow passes and
   `publishConfig.access` repeats. Without it npm treats the package as private
   and rejects it with `E402 Payment Required`.
@@ -35,7 +49,7 @@ copy the version into `server.json` (top level and the npm package entry) and
 stages it into the same commit. `src/version.ts` reads package.json at
 runtime, so the server never reports a third copy.
 
-`npm run check` (in CI, the release job and `prepublishOnly`) fails when
+`npm run check` (in CI, the publish job and `prepublishOnly`) fails when
 `server.json` disagrees with `package.json`, when its `name` differs from
 `mcpName`, or when its description is over the registry's 100-character
 limit. If you edited `package.json` by hand, `npm run sync-version` fixes it.
@@ -135,7 +149,7 @@ Finally, add the server to a client as in the docs
 
 ## Upgrading mcp-publisher
 
-`release.yml` pins `PUBLISHER_VERSION` and `PUBLISHER_SHA256` because that
+`publish.yml` pins `PUBLISHER_VERSION` and `PUBLISHER_SHA256` because that
 step holds a token that can publish under our namespace. To upgrade, take the
 new version from https://github.com/modelcontextprotocol/registry/releases
 and the `mcp-publisher_linux_amd64.tar.gz` line from that release's

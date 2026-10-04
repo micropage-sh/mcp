@@ -9,7 +9,7 @@ MCP server for [micropage.sh](https://micropage.sh). It lets an AI assistant (Cl
 The server needs Node.js 20 or later and a Pro or Pro+ account. It uses the session from the [micropage CLI](https://www.npmjs.com/package/micropage):
 
 ```sh
-npm install -g micropage
+npm install -g @micropage-sh/cli
 micropage login
 claude mcp add micropage -- npx -y @micropage-sh/mcp
 ```
