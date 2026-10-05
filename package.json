@@ -1,6 +1,6 @@
 {
   "name": "@micropage-sh/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for micropage.sh: let an AI assistant create, edit and publish micropages from markup.",
   "mcpName": "io.github.micropage-sh/mcp",
   "type": "module",
