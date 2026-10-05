@@ -15,6 +15,7 @@ compatibility_flags = ["nodejs_compat"]
 # serves, set workers_dev = false so the Worker is reachable on one public
 # host only (the one RESOURCE_URL names).
 workers_dev = true
+preview_urls = false
 
 [observability]
 enabled = true
