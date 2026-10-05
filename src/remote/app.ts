@@ -122,7 +122,10 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
         );
       }
       entry.error_code = err instanceof OAuthError ? String(err.code) : "auth_failed";
-      if (await overLimit(env.IP_LIMITER, `ip:${request.headers.get("cf-connecting-ip") ?? "unknown"}`)) {
+      // Only presented-but-bad credentials count: a bare discovery request (no Authorization) is how
+      // every OAuth client starts, and hosted clients share egress IPs across many users.
+      const presentedCredential = Boolean(request.headers.get("authorization")?.trim());
+      if (presentedCredential && (await overLimit(env.IP_LIMITER, `ip:${request.headers.get("cf-connecting-ip") ?? "unknown"}`))) {
         entry.error_code = "rate_limited";
         return withCors(tooManyRequests(), cors);
       }

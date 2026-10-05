@@ -443,12 +443,17 @@ describe("origin and rate limits", () => {
     expect(keys).toEqual(["sub:user-a", "sub:user-a", "sub:user-a"]);
   });
 
-  it("counts failed authentication per IP and answers 429 past the limit", async () => {
+  it("counts presented-but-bad credentials per IP and answers 429 past the limit", async () => {
     const keys: string[] = [];
     const limiter: RateLimiter = { limit: async ({ key }) => (keys.push(key), { success: keys.length < 2 }) };
     const e = env({ IP_LIMITER: limiter });
-    expect((await rpc(null, INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(401);
-    expect((await rpc(null, INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(429);
+    // Bare discovery requests (no Authorization) are never counted: hosted clients share egress IPs.
+    for (let i = 0; i < 3; i++) {
+      expect((await rpc(null, INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(401);
+    }
+    expect(keys).toEqual([]);
+    expect((await rpc("not-a-valid-token", INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(401);
+    expect((await rpc("not-a-valid-token", INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(429);
     expect(keys).toEqual(["ip:203.0.113.9", "ip:203.0.113.9"]);
     // A verified request never touches the IP limiter.
     expect((await rpc(oauthToken("user-a"), INIT, {}, e)).status).toBe(200);
