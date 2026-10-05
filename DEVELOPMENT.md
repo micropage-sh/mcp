@@ -151,8 +151,7 @@ in `mcp_connection_permissions` instead (see Remote server).
 
 The hosted server is a Cloudflare Worker, `micropage-mcp-remote`, built from
 the same `createServer(ctx, deps)` as stdio. It is live at
-`https://micropage-mcp-remote.cosmin-stefaniga.workers.dev/mcp` and will move
-to `https://mcp.micropage.sh/mcp` as a Custom Domain. User docs:
+`https://mcp.micropage.sh/mcp`, a Workers Custom Domain (`workers_dev = false`). User docs:
 `docs/docs/mcp/remote.md` in the monorepo.
 
 ```
@@ -200,11 +199,11 @@ CLI ship).
 protected-resource metadata, so it must be exactly the URL clients connect
 to. The Worker answers `/mcp` and the metadata with 500 (`config_error`
 `RESOURCE_URL_*` in the logs) when it is not a valid URL, is not `https`, or
-still contains `REPLACE`. When the Custom Domain is attached, set it to
-`https://mcp.micropage.sh/mcp` and `workers_dev = false` in the same deploy,
-so the Worker answers on one host only. Do not add `routes`: the
-`micropage.sh` zone's `*/*` route belongs to the custom-hostnames fallback
-Worker.
+still contains `REPLACE`. It is `https://mcp.micropage.sh/mcp`, with
+`workers_dev = false` so the Worker answers on one host only. The only route is
+the Custom Domain entry (`custom_domain = true`); never add zone routes, since
+the `micropage.sh` zone's `*/*` and `*.micropage.sh/*` routes belong to the
+custom-hostnames fallback Worker (which excludes `mcp.micropage.sh/*`).
 
 **Plan.** The Worker needs the Workers Paid plan on its Cloudflare account.
 Do not move it to an account on the Free plan.

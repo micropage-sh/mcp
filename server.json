@@ -60,5 +60,11 @@
         }
       ]
     }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.micropage.sh/mcp"
+    }
   ]
 }
