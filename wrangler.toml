@@ -1,0 +1,49 @@
+# Hosted (remote) micropage MCP server: streamable HTTP at /mcp, OAuth via
+# the Supabase OAuth server. Development only from this repo: nothing here is
+# part of the npm package (tsconfig.json excludes src/remote from dist).
+#
+#   npm run dev:remote      local wrangler dev
+#   npm run deploy:remote   wrangler deploy (production: coordinate first)
+name = "micropage-mcp-remote"
+main = "src/remote/worker.ts"
+compatibility_date = "2026-09-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Served on workers.dev until mcp.micropage.sh is attached as a Custom Domain
+# in a later, coordinated step. No routes here: the micropage.sh zone's */*
+# route belongs to micropage-custom-hostnames-fallback.
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+# Public URL of the MCP endpoint; the `resource` in the protected-resource
+# metadata. Replace with the real workers.dev URL before the first deploy, and
+# with https://mcp.micropage.sh/mcp once the Custom Domain is attached.
+RESOURCE_URL = "https://micropage-mcp-remote.REPLACE-WITH-ACCOUNT-SUBDOMAIN.workers.dev/mcp"
+SUPABASE_URL = "https://vhlifcdslnmnvnvorluu.supabase.co"
+# Public anon key, the same one the editor and the CLI ship.
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZobGlmY2RzbG5tbnZudm9ybHV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjUxMTUzMTMsImV4cCI6MjA0MDY5MTMxM30.IprHOpa397Wcv5iFwa_e9hkXhhmXYZFXC4BF_qGYkkk"
+# Comma-separated browser Origin hostnames allowed to call /mcp (e.g.
+# "claude.ai"). Requests without an Origin header (server-side MCP clients)
+# always pass; an Origin not listed here gets 403.
+ALLOWED_ORIGINS = ""
+
+# Secrets (not vars), set with `wrangler secret put <NAME>`:
+#   MCP_CONFIRM_KEY  at least 32 random characters; signs preview_post_send
+#                    confirmation tokens. Rotating it invalidates outstanding
+#                    previews (15 min). Generate with: openssl rand -base64 48
+# No request-state key: the server mints no MRTR requestState.
+
+# Per-user limit: keyed by the OAuth token's sub, or by the deploy token's hash.
+[[ratelimits]]
+name = "USER_LIMITER"
+namespace_id = "5001"
+simple = { limit = 120, period = 60 }
+
+# Per-IP limit on requests that fail authentication (cf-connecting-ip).
+[[ratelimits]]
+name = "IP_LIMITER"
+namespace_id = "5002"
+simple = { limit = 30, period = 60 }

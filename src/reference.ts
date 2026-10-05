@@ -17,8 +17,8 @@ export const LIST_CACHE_HINTS: NonNullable<McpServerOptions["cacheHints"]> = {
 };
 
 /** micropage:// resources, the four workflow prompts, and get_markup_reference. */
-export function registerReference(server: McpServer, _ctx: ToolContext): void {
+export function registerReference(server: McpServer, ctx: ToolContext): void {
   registerResources(server);
-  registerPrompts(server);
+  registerPrompts(server, ctx.hints);
   registerReferenceTool(server);
 }

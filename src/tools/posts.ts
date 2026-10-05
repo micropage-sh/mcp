@@ -383,11 +383,6 @@ function sendFacts(project: Project, post: PostRow): SendFacts {
 const RESEND_WARNING =
   "This post is already published, so publishing again RE-SENDS the email to everyone on the list and resets its click-through stats.";
 
-const SEND_DISABLED =
-  "Emailing from the MCP server is turned off. The user can turn it on by adding MICROPAGE_MCP_ALLOW_SEND=1 to this server's env in their MCP client config " +
-  "and restarting it, or publish from the micropage editor or with `micropage posts publish`. To publish on the web only, save the post with email: false " +
-  "(upsert_post), then call preview_post_send again.";
-
 async function loadPost(ctx: ToolContext, project: Project, rawSlug: string): Promise<PostRow> {
   const slug = normaliseSlug(rawSlug);
   const post = await getPostBySlug(ctx.http, project.id, slug);
@@ -454,7 +449,7 @@ export async function runPreviewPostSend(ctx: ToolContext, args: z.infer<typeof 
     resend_warning: facts.willEmail && facts.alreadyPublished ? RESEND_WARNING : null,
     send_allowed: ctx.permissions.allowSend,
     publish_allowed: !blocked,
-    blocked_reason: blocked ? SEND_DISABLED : null,
+    blocked_reason: blocked ? ctx.hints.sendDisabled : null,
     confirmation_token: ctx.confirmationTokens.mint(sub, facts.tokenPayload),
     expires_in_seconds: Math.round(DEFAULT_TOKEN_TTL_MS / 1000),
   };
@@ -504,7 +499,7 @@ export async function runPublishPost(
   const facts = sendFacts(project, post);
 
   if (facts.willEmail && !ctx.permissions.allowSend) {
-    throw new MicropageError("SEND_DISABLED", `"${post.slug}" is set to email its list when published. ${SEND_DISABLED} Nothing was changed.`);
+    throw new MicropageError("SEND_DISABLED", `"${post.slug}" is set to email its list when published. ${ctx.hints.sendDisabled} Nothing was changed.`);
   }
   const sub = await ctx.tier.currentUserId();
   requireConfirmationToken(ctx.confirmationTokens, args.confirmation_token, sub, facts.tokenPayload, "preview_post_send");
@@ -688,11 +683,11 @@ Images are not uploaded here. For the hero pass an https URL or the filename of 
       title: "Preview publishing a post",
       description: `Show what publish_post would do for one post, and get the confirmation_token publish_post requires. Call it before every publish and show the user the result.
 
-Reports whether publishing emails the newsletter list, the list name, the number of active subscribers it would go to, whether the post is already published (publishing again re-sends the email to the whole list), and whether this server is allowed to send email (MICROPAGE_MCP_ALLOW_SEND).
+Reports whether publishing emails the newsletter list, the list name, the number of active subscribers it would go to, whether the post is already published (publishing again re-sends the email to the whole list), and whether this server is allowed to send email (${ctx.hints.sendSwitchName}).
 
 The token is tied to the post as it is now: any edit to the post (upsert_post) or to its list invalidates it, and it expires after 15 minutes or when the server restarts. Read-only: nothing is published or sent.`,
       inputSchema: PreviewPostSendInput,
-      outputSchema: PreviewPostSendOutput,
+      outputSchema: PreviewPostSendOutput.extend({ send_allowed: z.boolean().describe(ctx.hints.sendAllowedField) }),
       annotations: RO,
     },
     async (args) => {
@@ -712,7 +707,7 @@ The token is tied to the post as it is now: any edit to the post (upsert_post) o
 
 Needs the confirmation_token from preview_post_send, taken after the post's last change; show the user that preview and get their go-ahead first. A stale or missing token is refused with nothing changed.
 
-Posts that would send email are refused unless the user has set MICROPAGE_MCP_ALLOW_SEND=1 in this server's config; there is no web-only override, so to publish such a post on the web only, save it with email: false first. When the client supports it the user is also asked to confirm the send directly. ${REBUILD_NOTE} Use unpublish_post to take a post down.`,
+Posts that would send email are refused unless ${ctx.hints.sendEnabledBy}; there is no web-only override, so to publish such a post on the web only, save it with email: false first. When the client supports it the user is also asked to confirm the send directly. ${REBUILD_NOTE} Use unpublish_post to take a post down.`,
       inputSchema: PublishPostInput,
       outputSchema: PublishPostOutput,
       annotations: OUT,

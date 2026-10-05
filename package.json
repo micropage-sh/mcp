@@ -24,6 +24,8 @@
     "test": "vitest run",
     "smoke": "tsx scripts/smoke.ts",
     "inspect": "npx -y @modelcontextprotocol/inspector tsx src/index.ts",
+    "dev:remote": "wrangler dev",
+    "deploy:remote": "wrangler deploy",
     "check": "node scripts/check-publishable.mjs",
     "prepublishOnly": "npm run build && node scripts/check-publishable.mjs && node scripts/check-content-drift.mjs --strict",
     "sync-content": "node scripts/sync-content.mjs",
@@ -62,6 +64,7 @@
     "@types/node": "^24.19.1",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
   }
 }

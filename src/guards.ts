@@ -11,6 +11,7 @@ import {
 import type { AuthProvider } from "./client/auth-provider.js";
 import { MicropageError } from "./client/errors.js";
 import type { Permissions } from "./context.js";
+import { STDIO_HINTS } from "./hints.js";
 
 // ---------------------------------------------------------------------------
 // Env switches (stdio's source of Permissions)
@@ -250,13 +251,14 @@ export function assertDeployTokenAllows(
   auth: Pick<AuthProvider, "mode" | "pinnedProjectUuid">,
   tool: string,
   projectUuid?: string,
+  elsewhere: string = STDIO_HINTS.deployTokenElsewhere,
 ): void {
   if (auth.mode !== "deploy_token") return;
   if (!DEPLOY_TOKEN_TOOLS.has(tool)) {
     throw new MicropageError(
       "NOT_ALLOWED_IN_DEPLOY_TOKEN_MODE",
       `${tool} is not available with a deploy token. This server is limited to: ` +
-        `${[...DEPLOY_TOKEN_TOOLS].join(", ")}. Use a full \`micropage login\` session for anything else.`,
+        `${[...DEPLOY_TOKEN_TOOLS].join(", ")}. ${elsewhere}`,
     );
   }
   if (projectUuid !== undefined && projectUuid !== auth.pinnedProjectUuid) {

@@ -693,7 +693,7 @@ Images are not uploaded here: call upload_asset first, then reference the file w
 
 Only call it when the user explicitly asks to delete this specific project. Pass \`confirm_domain\` with the project's micropage domain (from get_project) after the user has confirmed; a mismatch is refused without changing anything. Clients that support it also show the user a confirmation prompt, and declining aborts.
 
-Never use it to "reset" a site; save_page and publish_build replace the content instead. Available only because MICROPAGE_MCP_ALLOW_DELETE is set.`,
+Never use it to "reset" a site; save_page and publish_build replace the content instead. ${ctx.hints.deleteAvailable}`,
         inputSchema: DeleteProjectInput,
         outputSchema: DeleteProjectOutput,
         annotations: OUT,

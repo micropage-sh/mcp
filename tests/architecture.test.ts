@@ -59,6 +59,10 @@ describe("architecture: the server core stays free of Node-only modules", () => 
     expect(forbiddenReachable([join(SRC, "server.ts"), ...TOOL_FILES])).toEqual([]);
   });
 
+  it("nothing reachable from the Worker entry (src/remote/worker.ts) imports them either", () => {
+    expect(forbiddenReachable([join(SRC, "remote", "worker.ts")])).toEqual([]);
+  });
+
   it("the walker does see Node-only imports (src/node/deps.ts has them)", () => {
     const found = forbiddenReachable([join(SRC, "node", "deps.ts")]);
     expect(found.some((f) => f.endsWith("node:fs/promises"))).toBe(true);

@@ -4,7 +4,6 @@ import * as z from "zod";
 import { RO } from "../annotations.js";
 import { isMicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
-import { LOGIN_HINT } from "../client/auth-provider.js";
 import { decodeJwtClaims } from "../client/jwt.js";
 import { UPGRADE_MESSAGE, isPaidTier, type PlanTier } from "../client/tier.js";
 import type { ToolContext } from "../context.js";
@@ -53,7 +52,7 @@ interface SubscriptionRow {
 const AUTH_FAILURES = new Set(["NOT_LOGGED_IN", "SESSION_EXPIRED", "SESSION_UNREADABLE", "DEPLOY_TOKEN_INVALID", "AUTH_EXPIRED"]);
 
 export async function runWhoami(ctx: ToolContext): Promise<WhoamiResult> {
-  assertDeployTokenAllows(ctx.auth, "whoami");
+  assertDeployTokenAllows(ctx.auth, "whoami", undefined, ctx.hints.deployTokenElsewhere);
   const configPath = ctx.auth.sessionPath ?? null;
   const base: WhoamiResult = {
     logged_in: false,
@@ -89,7 +88,7 @@ export async function runWhoami(ctx: ToolContext): Promise<WhoamiResult> {
       user = await ctx.http.request<AuthUser>("GET", `${ctx.config.supabaseUrl}/auth/v1/user`);
     } catch (err) {
       if (isMicropageError(err) && AUTH_FAILURES.has(err.code)) {
-        const note = err.code === "AUTH_EXPIRED" ? err.message : `The micropage login session is no longer valid. ${LOGIN_HINT}`;
+        const note = err.code === "AUTH_EXPIRED" ? err.message : ctx.hints.loginInvalid;
         return { ...base, note };
       }
       throw err;
@@ -137,9 +136,9 @@ export function registerAccountTools(server: McpServer, ctx: ToolContext): void 
     "whoami",
     {
       title: "Show the micropage account in use",
-      description: `Report which micropage account this server acts as: email, plan tier, subscription, and whether it runs on the user's \`micropage login\` session or on a project deploy token (and if so, which project it is pinned to).
+      description: `Report which micropage account this server acts as: email, plan tier, subscription, and ${ctx.hints.whoamiModes}.
 
-Call it first when a micropage tool fails with a login, session or plan error, or when the user asks which account is connected. It never fails for a missing login: it returns logged_in false and a note saying what the user must do (usually run \`micropage login\` in a terminal). It does not log in, log out, or change anything.
+Call it first when a micropage tool fails with a login, session or plan error, or when the user asks which account is connected. It never fails for a missing login: it returns logged_in false and a note saying what the user must do (${ctx.hints.whoamiFix}). It does not log in, log out, or change anything.
 
 Do not call it before every task; the other tools report login and plan problems themselves.`,
       inputSchema: WhoamiInput,

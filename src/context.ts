@@ -6,6 +6,7 @@ import type { MicropageConfig } from "./client/config.js";
 import type { FetchLike, Http } from "./client/http.js";
 import type { PlanGate } from "./client/tier.js";
 import type { ConfirmationTokens } from "./guards.js";
+import type { ModeHints } from "./hints.js";
 
 /**
  * What the user allowed this connection to do. Each defaults off. Stdio reads
@@ -52,10 +53,15 @@ export interface ServerDeps {
   /** Signs preview_post_send tokens; its key decides which servers accept them. */
   confirmationTokens: ConfirmationTokens;
   uploads: UploadDeps;
+  /** Wording that names how the user changes a setting or fixes a login. Defaults to the stdio wording. */
+  hints?: ModeHints;
+  /** Called with each error a tool handler throws, before the SDK turns it into an isError result (logging). */
+  onToolError?: (tool: string, error: unknown) => void;
 }
 
 /** What every register* function receives: the deps plus per-instance protocol facts. */
 export interface ToolContext extends ServerDeps {
+  hints: ModeHints;
   /** Protocol era this server instance serves (fixed per instance by the factory). */
   era: ProtocolEra;
   /** The calling client's declared capabilities for this request, era-correct. */

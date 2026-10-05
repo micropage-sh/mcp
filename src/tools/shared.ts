@@ -9,8 +9,8 @@ import { assertDeployTokenAllows } from "../guards.js";
  * network call: the deploy-token tool allowlist, then the paid-plan gate
  * (cached 5 min; skipped in deploy-token mode, since only Pro+ can mint one).
  */
-export async function gateTool(ctx: Pick<ToolContext, "auth" | "tier">, tool: string): Promise<void> {
-  assertDeployTokenAllows(ctx.auth, tool);
+export async function gateTool(ctx: Pick<ToolContext, "auth" | "tier" | "hints">, tool: string): Promise<void> {
+  assertDeployTokenAllows(ctx.auth, tool, undefined, ctx.hints.deployTokenElsewhere);
   await ctx.tier.requirePaidPlan();
 }
 

@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/server";
 
 import type { ServerDeps, ToolContext } from "./context.js";
+import { STDIO_HINTS } from "./hints.js";
 import { LIST_CACHE_HINTS, registerReference } from "./reference.js";
 import { registerAccountTools } from "./tools/account.js";
 import { registerBuildTools } from "./tools/builds.js";
@@ -30,9 +31,11 @@ export const SERVER_NAME = "micropage";
  */
 export function createServer(ctx: McpRequestContext, deps: ServerDeps): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { cacheHints: LIST_CACHE_HINTS });
+  if (deps.onToolError) observeToolErrors(server, deps.onToolError);
 
   const toolCtx: ToolContext = {
     ...deps,
+    hints: deps.hints ?? STDIO_HINTS,
     era: ctx.era,
     clientCapabilities: (handlerCtx: ServerContext): ClientCapabilities | undefined => {
       if (ctx.era === "modern") {
@@ -53,6 +56,26 @@ export function createServer(ctx: McpRequestContext, deps: ServerDeps): McpServe
   registerReference(server, toolCtx);
 
   return server;
+}
+
+/**
+ * Wraps every tool handler registered after this call so `observe` sees the
+ * error it throws; the error still propagates, so the SDK's isError result
+ * is unchanged. The SDK reduces a thrown error to its message, and the
+ * remote server wants the error code for its logs.
+ */
+function observeToolErrors(server: McpServer, observe: (tool: string, error: unknown) => void): void {
+  const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: (...args: unknown[]) => unknown) => unknown;
+  const wrapped = (name: string, config: unknown, cb: (...args: unknown[]) => unknown): unknown =>
+    register(name, config, async (...args: unknown[]) => {
+      try {
+        return await cb(...args);
+      } catch (err) {
+        observe(name, err);
+        throw err;
+      }
+    });
+  server.registerTool = wrapped as unknown as typeof server.registerTool;
 }
 
 export function createServerFactory(deps: ServerDeps): McpServerFactory {
