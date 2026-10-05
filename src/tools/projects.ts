@@ -684,7 +684,7 @@ Images are not uploaded here: call upload_asset first, then reference the file w
     },
   );
 
-  if (ctx.flags.allowDelete) {
+  if (ctx.permissions.allowDelete) {
     server.registerTool(
       "delete_project",
       {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MicropageError } from "../src/client/errors.js";
-import { PLAN_CACHE_TTL_MS, PlanGate, PRICING_URL } from "../src/client/tier.js";
+import { PLAN_CACHE_MAX_USERS, PLAN_CACHE_TTL_MS, PlanGate, PlanTierCache, PRICING_URL } from "../src/client/tier.js";
 import { FakeAuth, createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 import { tokenFor } from "./helpers/session.js";
 
@@ -67,6 +67,54 @@ describe("PlanGate", () => {
     await g.requirePaidPlan();
     await auth.getAccessToken({ forceRefresh: true }); // the session now belongs to user-2
     await expect(g.requirePaidPlan()).rejects.toMatchObject({ code: "PLAN_REQUIRED" });
+  });
+
+  it("keeps one cache entry per user, so alternating users do not evict each other", async () => {
+    const auth = new FakeAuth([tokenFor("user-1", 3600), tokenFor("user-2", 3600), tokenFor("user-1", 3600, Date.now(), "again")]);
+    const fake = createFakeFetch({ body: [{ plan_tier: "pro" }] }, { body: [{ plan_tier: "free" }] });
+    const g = gate(fake, { now: 1 }, auth);
+    expect(await g.getPlanTier()).toBe("pro");
+    await auth.getAccessToken({ forceRefresh: true });
+    expect(await g.getPlanTier()).toBe("free");
+    await auth.getAccessToken({ forceRefresh: true });
+    expect(await g.getPlanTier()).toBe("pro");
+    expect(fake.calls).toHaveLength(2);
+  });
+
+  it("shares a PlanTierCache across gates (one gate per request on the remote server)", async () => {
+    const cache = new PlanTierCache();
+    const fake = createFakeFetch({ body: [{ plan_tier: "pro_plus" }] });
+    const perRequest = () => {
+      const auth = new FakeAuth([TOKEN]);
+      return new PlanGate({ http: makeHttp(fake, auth), auth, now: () => 1, cache });
+    };
+    expect(await perRequest().getPlanTier()).toBe("pro_plus");
+    expect(await perRequest().getPlanTier()).toBe("pro_plus");
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it("makes one lookup for concurrent calls by the same user", async () => {
+    const fake = createFakeFetch({ body: [{ plan_tier: "pro" }] });
+    const g = gate(fake);
+    expect(await Promise.all([g.getPlanTier(), g.getPlanTier(), g.getPlanTier()])).toEqual(["pro", "pro", "pro"]);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it("bounds the cache, dropping expired entries first", () => {
+    const cache = new PlanTierCache();
+    const ttl = 100;
+    for (let i = 0; i < PLAN_CACHE_MAX_USERS; i++) cache.set(`u${i}`, "pro", i < 10 ? 0 : 500, ttl);
+    cache.set("new", "free", 550, ttl);
+    expect(cache.size).toBe(PLAN_CACHE_MAX_USERS - 10 + 1);
+    expect(cache.get("u0", 550, ttl)).toBeNull();
+    expect(cache.get("u10", 550, ttl)).toBe("pro");
+    expect(cache.get("new", 550, ttl)).toBe("free");
+    // Full of live entries: the oldest insertion goes.
+    for (let i = 0; i < 9; i++) cache.set(`more${i}`, "pro", 550, ttl);
+    expect(cache.size).toBe(PLAN_CACHE_MAX_USERS);
+    cache.set("last", "pro", 560, ttl);
+    expect(cache.size).toBe(PLAN_CACHE_MAX_USERS);
+    expect(cache.get("u10", 560, ttl)).toBeNull();
   });
 
   it("skips the lookup in deploy-token mode (deploy tokens are Pro+ only)", async () => {

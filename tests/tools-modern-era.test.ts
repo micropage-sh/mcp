@@ -4,7 +4,8 @@ import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { PostRow } from "../src/client/posts.js";
-import { createDeps, createServerFactory } from "../src/server.js";
+import { createDeps } from "../src/node/deps.js";
+import { createServerFactory } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
 

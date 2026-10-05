@@ -1,7 +1,6 @@
-import type { AuthProvider } from "./auth-provider.js";
+import { currentUserId, type AuthProvider } from "./auth-provider.js";
 import { MicropageError, PRICING_URL } from "./errors.js";
 import { eq, type Http } from "./http.js";
-import { decodeJwtClaims } from "./jwt.js";
 
 export { PRICING_URL };
 
@@ -18,11 +17,54 @@ export function isPaidTier(tier: string | null | undefined): tier is "pro" | "pr
   return tier === "pro" || tier === "pro_plus";
 }
 
+/** Bound on cached users; past it, expired entries are dropped before adding one. */
+export const PLAN_CACHE_MAX_USERS = 1000;
+
+/**
+ * Tier lookups keyed by user id. A PlanGate owns one by default; the remote
+ * server builds a gate per request and passes one long-lived cache to all of
+ * them, so the cache outlives the request without sharing anything else.
+ */
+export class PlanTierCache {
+  private readonly entries = new Map<string, { tier: PlanTier; at: number }>();
+  readonly inflight = new Map<string, Promise<PlanTier>>();
+
+  get(userId: string, now: number, ttlMs: number): PlanTier | null {
+    const hit = this.entries.get(userId);
+    return hit && now - hit.at < ttlMs ? hit.tier : null;
+  }
+
+  set(userId: string, tier: PlanTier, now: number, ttlMs: number): void {
+    if (this.entries.size >= PLAN_CACHE_MAX_USERS && !this.entries.has(userId)) {
+      for (const [id, entry] of this.entries) {
+        if (now - entry.at >= ttlMs) this.entries.delete(id);
+      }
+      // Still full of live entries: drop the oldest insertion.
+      if (this.entries.size >= PLAN_CACHE_MAX_USERS) {
+        const oldest = this.entries.keys().next();
+        if (!oldest.done) this.entries.delete(oldest.value);
+      }
+    }
+    this.entries.delete(userId);
+    this.entries.set(userId, { tier, at: now });
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+}
+
 export interface PlanGateOptions {
   http: Http;
   auth: AuthProvider;
   now?: () => number;
   ttlMs?: number;
+  /** Shared across gates (one per request on the remote server). */
+  cache?: PlanTierCache;
 }
 
 /**
@@ -35,23 +77,19 @@ export class PlanGate {
   private readonly auth: AuthProvider;
   private readonly now: () => number;
   private readonly ttlMs: number;
-  private cache: { userId: string; tier: PlanTier; at: number } | null = null;
-  private inflight: Promise<PlanTier> | null = null;
+  private readonly cache: PlanTierCache;
 
   constructor(options: PlanGateOptions) {
     this.http = options.http;
     this.auth = options.auth;
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PLAN_CACHE_TTL_MS;
+    this.cache = options.cache ?? new PlanTierCache();
   }
 
   /** The signed-in user's id, read from the access token's `sub`. */
-  async currentUserId(): Promise<string> {
-    const sub = decodeJwtClaims(await this.auth.getAccessToken())?.sub;
-    if (typeof sub !== "string" || !sub) {
-      throw new MicropageError("SESSION_EXPIRED", "The micropage access token has no user id. Run `micropage login` in a terminal, then retry.");
-    }
-    return sub;
+  currentUserId(): Promise<string> {
+    return currentUserId(this.auth);
   }
 
   /**
@@ -60,21 +98,24 @@ export class PlanGate {
    */
   async getPlanTier(): Promise<PlanTier> {
     const userId = await this.currentUserId();
-    const hit = this.cache;
-    if (hit && hit.userId === userId && this.now() - hit.at < this.ttlMs) return hit.tier;
+    const hit = this.cache.get(userId, this.now(), this.ttlMs);
+    if (hit) return hit;
 
-    this.inflight ??= (async () => {
+    const pending = this.cache.inflight.get(userId);
+    if (pending) return pending;
+    const lookup = (async () => {
       const row = await this.http.selectOne<{ plan_tier: string | null }>("customers", {
         select: "plan_tier",
         filters: { user_id: eq(userId) },
       });
       const tier: PlanTier = isPaidTier(row?.plan_tier) ? row.plan_tier : "free";
-      this.cache = { userId, tier, at: this.now() };
+      this.cache.set(userId, tier, this.now(), this.ttlMs);
       return tier;
     })().finally(() => {
-      this.inflight = null;
+      this.cache.inflight.delete(userId);
     });
-    return this.inflight;
+    this.cache.inflight.set(userId, lookup);
+    return lookup;
   }
 
   /**
@@ -91,6 +132,6 @@ export class PlanGate {
   }
 
   clearCache(): void {
-    this.cache = null;
+    this.cache.clear();
   }
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
-import { createDeps, createServerFactory } from "./server.js";
+import { createDeps } from "./node/deps.js";
+import { createServerFactory } from "./server.js";
 
 // stdout carries the protocol; diagnostics must go to stderr or the client
 // sees a corrupted JSON-RPC stream.

@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DESTRUCTIVE, OUT, RO } from "../src/annotations.js";
 import { postContentFingerprint, type PostRow } from "../src/client/posts.js";
-import { createDeps, createServer } from "../src/server.js";
+import { createDeps } from "../src/node/deps.js";
+import { createServer } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
 
@@ -410,6 +411,18 @@ describe("preview_post_send + publish_post", () => {
     const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/does not match the current state/);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("refuses a token previewed under another account, with zero publish calls", async () => {
+    const fake = serve(backend({ posts: [post()] }));
+    const c = await connect(fake);
+    const { confirmation_token } = await preview(c);
+    // `micropage login` as someone else between the preview and the publish.
+    await cfg.write({ access_token: tokenFor("user-2", 3600), refresh_token: "r2", user: { id: "user-2" } });
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/another session or account/);
     expect(mutatingCalls(fake)).toHaveLength(0);
   });
 

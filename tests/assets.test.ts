@@ -13,11 +13,11 @@ import {
   isPrivateAddress,
   loadAssetSource,
   uploadAsset,
-  urlHostLookup,
   validateAssetFilename,
   type HostLookup,
 } from "../src/client/assets.js";
 import { MicropageError } from "../src/client/errors.js";
+import { nodePathLoader } from "../src/node/path-source.js";
 import { createFakeFetch, makeHttp, type RecordedCall } from "./helpers/fake-fetch.js";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
@@ -148,32 +148,39 @@ describe("isPrivateAddress", () => {
 
 /** Resolves every name to a public address, so no real DNS query is made. */
 const publicLookup: HostLookup = async () => [{ address: "93.184.216.34", family: 4 }];
-const realLookup = urlHostLookup.current;
 
 describe("loadAssetSource", () => {
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "micropage-mcp-assets-"));
-    urlHostLookup.current = publicLookup;
   });
   afterEach(async () => {
-    urlHostLookup.current = realLookup;
     await rm(dir, { recursive: true, force: true });
   });
 
   it("reads an absolute path", async () => {
     const p = join(dir, "a.png");
     await writeFile(p, PNG);
-    expect(await loadAssetSource({ path: p })).toEqual(PNG);
+    expect(await loadAssetSource({ path: p }, { pathLoader: nodePathLoader })).toEqual(PNG);
+  });
+
+  it("refuses {path} when the server has no path loader (a hosted server)", async () => {
+    const p = join(dir, "a.png");
+    await writeFile(p, PNG);
+    await expectCode(loadAssetSource({ path: p }), "INVALID_SOURCE", /not available on this server/);
+  });
+
+  it("caps what a path loader returns", async () => {
+    await expectCode(loadAssetSource({ path: "/x.png" }, { pathLoader: async () => new Uint8Array(101), maxBytes: 100 }), "ASSET_TOO_LARGE");
   });
 
   it("rejects a relative path, a missing file, a directory and an oversized file", async () => {
-    await expectCode(loadAssetSource({ path: "a.png" }), "INVALID_SOURCE", /relative/);
-    await expectCode(loadAssetSource({ path: join(dir, "missing.png") }), "INVALID_SOURCE", /ENOENT/);
-    await expectCode(loadAssetSource({ path: dir }), "INVALID_SOURCE", /not a regular file/);
+    await expectCode(loadAssetSource({ path: "a.png" }, { pathLoader: nodePathLoader }), "INVALID_SOURCE", /relative/);
+    await expectCode(loadAssetSource({ path: join(dir, "missing.png") }, { pathLoader: nodePathLoader }), "INVALID_SOURCE", /ENOENT/);
+    await expectCode(loadAssetSource({ path: dir }, { pathLoader: nodePathLoader }), "INVALID_SOURCE", /not a regular file/);
     const big = join(dir, "big.png");
     await writeFile(big, Buffer.alloc(101));
-    await expectCode(loadAssetSource({ path: big }, { maxBytes: 100 }), "ASSET_TOO_LARGE", /limit/);
+    await expectCode(loadAssetSource({ path: big }, { pathLoader: nodePathLoader, maxBytes: 100 }), "ASSET_TOO_LARGE", /limit/);
   });
 
   it("decodes base64 and data: URLs, and enforces the cap before decoding", async () => {
@@ -196,7 +203,7 @@ describe("loadAssetSource", () => {
       // Re-wrap with binary-safe bytes; the harness serializes bodies as strings.
       return new Response(PNG, { status: res.status, headers: res.headers });
     };
-    expect(await loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: fakeFetch })).toEqual(PNG);
+    expect(await loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: fakeFetch, lookup: publicLookup })).toEqual(PNG);
     expect(fake.calls[0]!.url).toBe("https://img.example.com/a.png");
     expect(fake.calls[0]!.headers.authorization).toBeUndefined();
     expect(fake.calls[0]!.headers.apikey).toBeUndefined();
@@ -273,10 +280,10 @@ describe("loadAssetSource", () => {
 
   it("refuses a redirect to plain http and more than 5 redirects", async () => {
     const toHttp = async () => new Response(null, { status: 302, headers: { location: "http://img.example.com/a.png" } });
-    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: toHttp }), "INVALID_SOURCE", /non-https/);
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: toHttp, lookup: publicLookup }), "INVALID_SOURCE", /non-https/);
     let n = 0;
     const loop = async () => new Response(null, { status: 302, headers: { location: `https://img.example.com/${++n}.png` } });
-    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: loop }), "INVALID_SOURCE", /more than 5/);
+    await expectCode(loadAssetSource({ url: "https://img.example.com/a.png" }, { fetch: loop, lookup: publicLookup }), "INVALID_SOURCE", /more than 5/);
     expect(n).toBe(6);
   });
 
@@ -289,7 +296,7 @@ describe("loadAssetSource", () => {
 
   it("enforces the cap from Content-Length and while streaming", async () => {
     const declared = async () => new Response(Buffer.alloc(10), { headers: { "content-length": "5000" } });
-    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: declared, maxBytes: 100 }), "ASSET_TOO_LARGE");
+    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: declared, maxBytes: 100, lookup: publicLookup }), "ASSET_TOO_LARGE");
     const chunked = async () =>
       new Response(
         new ReadableStream({
@@ -299,14 +306,14 @@ describe("loadAssetSource", () => {
           },
         }),
       );
-    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: chunked, maxBytes: 100 }), "ASSET_TOO_LARGE");
+    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: chunked, maxBytes: 100, lookup: publicLookup }), "ASSET_TOO_LARGE");
   });
 
   it("reports HTTP errors and timeouts from the image host", async () => {
-    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: async () => new Response("no", { status: 404 }) }), "HTTP", /404/);
+    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: async () => new Response("no", { status: 404 }), lookup: publicLookup }), "HTTP", /404/);
     const hang = (_: string, init?: RequestInit) =>
       new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason)));
-    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: hang, timeoutMs: 20 }), "TIMEOUT", /timed out/);
+    await expectCode(loadAssetSource({ url: "https://x.test/a.png" }, { fetch: hang, timeoutMs: 20, lookup: publicLookup }), "TIMEOUT", /timed out/);
   });
 });
 

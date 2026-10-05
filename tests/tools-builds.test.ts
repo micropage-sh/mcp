@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DESTRUCTIVE, OUT, RO, WRITE } from "../src/annotations.js";
 import type { Clock } from "../src/client/deploy-events.js";
-import { createDeps, createServer } from "../src/server.js";
+import { createDeps } from "../src/node/deps.js";
+import { createServer } from "../src/server.js";
 import { buildToolsClock } from "../src/tools/builds.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";

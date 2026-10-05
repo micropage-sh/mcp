@@ -8,8 +8,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RO, WRITE } from "../src/annotations.js";
-import { urlHostLookup } from "../src/client/assets.js";
-import { createDeps, createServer } from "../src/server.js";
+import type { HostLookup } from "../src/client/assets.js";
+import { createDeps } from "../src/node/deps.js";
+import { createServer } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
 
@@ -27,11 +28,12 @@ beforeEach(async () => {
   cfg = await tempConfig();
   await cfg.write({ access_token: tokenFor("user-1", 3600), refresh_token: "r1", user: { id: "user-1" } });
 });
-const realLookup = urlHostLookup.current;
+/** Replaces the system resolver in the next connect(); reset after each test. */
+let hostLookup: HostLookup | undefined;
 
 afterEach(async () => {
   vi.unstubAllGlobals();
-  urlHostLookup.current = realLookup;
+  hostLookup = undefined;
   await client?.close();
   client = undefined;
   await cfg.cleanup();
@@ -46,7 +48,7 @@ async function connect(fake: FakeFetch, extraEnv: Record<string, string> = {}): 
       MICROPAGE_SUPABASE_ANON_KEY: "anon-key",
       ...extraEnv,
     },
-    { fetch: fake.fetch },
+    { fetch: fake.fetch, ...(hostLookup ? { lookupHost: hostLookup } : {}) },
   );
   const server = createServer({ era: "legacy" }, deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -199,7 +201,7 @@ describe("upload_asset", () => {
     });
     vi.stubGlobal("fetch", external);
     const resolved: string[] = [];
-    urlHostLookup.current = async (host) => {
+    hostLookup = async (host) => {
       resolved.push(host);
       return [{ address: "93.184.216.34", family: 4 }];
     };

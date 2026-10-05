@@ -3,7 +3,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { RO } from "../src/annotations.js";
-import { createDeps, createServer } from "../src/server.js";
+import { createDeps } from "../src/node/deps.js";
+import { createServer } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
 

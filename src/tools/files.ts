@@ -15,7 +15,6 @@ import {
   type AssetSource,
 } from "../client/assets.js";
 import { MicropageError } from "../client/errors.js";
-import type { FetchLike } from "../client/http.js";
 import { ProjectRef, resolveProject } from "../client/project-ref.js";
 import type { ToolContext } from "../context.js";
 import { gateTool, structuredResult } from "./shared.js";
@@ -36,49 +35,54 @@ const AssetFilename = z
 // upload_asset
 // ---------------------------------------------------------------------------
 
-export const AssetSourceInput = z
-  .union([
-    z
-      .object({
-        path: z
-          .string()
-          .min(1)
-          .max(4096)
-          .describe("Absolute path to an image file on the machine running this server (local stdio installs only)."),
-      })
-      .strict(),
-    z
-      .object({
-        url: z
-          .string()
-          .min(1)
-          .max(4096)
-          .describe("A public https:// URL of the image. Fetched once, without micropage credentials, with a 20 s timeout."),
-      })
-      .strict(),
-    z
-      .object({
-        base64: z
-          .string()
-          .min(1)
-          // ~10 MB of bytes is ~13.4 M base64 chars; the decoded size is checked exactly later.
-          .max(14_000_000)
-          .describe("The image bytes, base64-encoded. A data: URL (data:image/png;base64,...) also works."),
-      })
-      .strict(),
-  ])
-  .describe(
-    `Where the bytes come from: exactly one of {path}, {url} or {base64}. Max ${MAX_MB} MB. The content must really be ` +
-      "the image type the filename's extension says.",
-  );
-
-export const UploadAssetInput = z
+const PathSource = z
   .object({
-    project: ProjectRef,
-    filename: AssetFilename,
-    source: AssetSourceInput,
+    path: z
+      .string()
+      .min(1)
+      .max(4096)
+      .describe("Absolute path to an image file on the machine running this server (local stdio installs only)."),
   })
   .strict();
+
+const UrlSource = z
+  .object({
+    url: z
+      .string()
+      .min(1)
+      .max(4096)
+      .describe("A public https:// URL of the image. Fetched once, without micropage credentials, with a 20 s timeout."),
+  })
+  .strict();
+
+const Base64Source = z
+  .object({
+    base64: z
+      .string()
+      .min(1)
+      // ~10 MB of bytes is ~13.4 M base64 chars; the decoded size is checked exactly later.
+      .max(14_000_000)
+      .describe("The image bytes, base64-encoded. A data: URL (data:image/png;base64,...) also works."),
+  })
+  .strict();
+
+const SOURCE_RULES = `Max ${MAX_MB} MB. The content must really be the image type the filename's extension says.`;
+
+/** With {path}: a server that can read the user's files. */
+export const AssetSourceInput = z
+  .union([PathSource, UrlSource, Base64Source])
+  .describe(`Where the bytes come from: exactly one of {path}, {url} or {base64}. ${SOURCE_RULES}`);
+
+/** Without {path}: a hosted server, so the schema never offers what it cannot do. */
+export const RemoteAssetSourceInput = z
+  .union([UrlSource, Base64Source])
+  .describe(`Where the bytes come from: exactly one of {url} or {base64}. ${SOURCE_RULES}`);
+
+const uploadAssetInput = <S extends typeof AssetSourceInput | typeof RemoteAssetSourceInput>(source: S) =>
+  z.object({ project: ProjectRef, filename: AssetFilename, source }).strict();
+
+export const UploadAssetInput = uploadAssetInput(AssetSourceInput);
+export const RemoteUploadAssetInput = uploadAssetInput(RemoteAssetSourceInput);
 
 const UploadAssetOutput = z.object({
   filename: z.string().describe("Stored name. Reference it in .page markup as `img: <- <filename>`."),
@@ -95,21 +99,18 @@ const UploadAssetOutput = z.object({
 });
 export type UploadAssetResult = z.infer<typeof UploadAssetOutput>;
 
-export interface UploadAssetDeps {
-  /** fetch for `{url}` sources. Never the micropage-authenticated client. */
-  fetchExternal?: FetchLike;
-}
-
-export async function runUploadAsset(
-  ctx: ToolContext,
-  args: z.infer<typeof UploadAssetInput>,
-  deps: UploadAssetDeps = {},
-): Promise<UploadAssetResult> {
+export async function runUploadAsset(ctx: ToolContext, args: z.infer<typeof UploadAssetInput>): Promise<UploadAssetResult> {
   await gateTool(ctx, "upload_asset");
   // Validated before any network call or file read.
   const filename = validateAssetFilename(args.filename);
   const project = await resolveProject(ctx, args.project);
-  const bytes = await loadAssetSource(args.source as AssetSource, deps.fetchExternal ? { fetch: deps.fetchExternal } : {});
+  const { pathLoader, lookupHost, deniedHosts, fetchExternal } = ctx.uploads;
+  const bytes = await loadAssetSource(args.source as AssetSource, {
+    lookup: lookupHost,
+    ...(pathLoader ? { pathLoader } : {}),
+    ...(deniedHosts ? { deniedHosts } : {}),
+    ...(fetchExternal ? { fetch: fetchExternal } : {}),
+  });
   assertContentMatchesExtension(filename, bytes);
 
   const result = await uploadAsset(ctx.http, project.id, filename, bytes);
@@ -208,27 +209,31 @@ export async function runGetFileUrl(ctx: ToolContext, args: z.infer<typeof GetFi
 // ---------------------------------------------------------------------------
 
 export function registerFileTools(server: McpServer, ctx: ToolContext): void {
-  server.registerTool(
-    "upload_asset",
-    {
-      title: "Upload an image asset",
-      description: `Upload one image (${EXTENSIONS}; max ${MAX_MB} MB) to a micropage project's file storage, from a local file path, a public https URL, or base64 bytes. Returns the stored filename, the markup to reference it (\`img: <- hero.webp\`) and its URL.
+  const local = ctx.uploads.pathLoader !== undefined;
+  const sources = local ? "from a local file path, a public https URL, or base64 bytes" : "from a public https URL or base64 bytes";
+  const uploadConfig = {
+    title: "Upload an image asset",
+    description: `Upload one image (${EXTENSIONS}; max ${MAX_MB} MB) to a micropage project's file storage, ${sources}. Returns the stored filename, the markup to reference it (\`img: <- hero.webp\`) and its URL.
 
 Use it BEFORE save_page or upsert_post reference the image: page markup like \`img: <- hero.webp\` and a post's \`hero: hero.webp\` only resolve to files already stored in the project, and a missing name renders no image. Upload each asset once; calling again with identical content is a no-op (deduped: true, same SHA-256 as the CLI uses).
 
 Uploading different content under an existing name deletes the old file and stores the new one. A page that is already live keeps pointing at the old file until it is saved and published again, so re-run save_page and publish_build after replacing an image on a live site. Prefer a new filename to avoid that.
 
 Do not use it for non-image files (unsupported), for images already hosted elsewhere that markup can reference by full https URL, or to look up existing files (use list_files). Fails with the plan's storage limit when the project is full.`,
-      inputSchema: UploadAssetInput,
-      outputSchema: UploadAssetOutput,
-      annotations: hints(WRITE, { idempotentHint: true, destructiveHint: true }),
-    },
-    async (args) => {
-      const result = await runUploadAsset(ctx, args);
-      const what = result.deduped ? "Already stored (identical content)" : result.replaced ? "Replaced" : "Uploaded";
-      return structuredResult(result, `${what}: ${result.filename}. Reference it as \`${result.markup}\`.`);
-    },
-  );
+    outputSchema: UploadAssetOutput,
+    annotations: hints(WRITE, { idempotentHint: true, destructiveHint: true }),
+  };
+  const uploadHandler = async (args: z.infer<typeof UploadAssetInput>) => {
+    const result = await runUploadAsset(ctx, args);
+    const what = result.deduped ? "Already stored (identical content)" : result.replaced ? "Replaced" : "Uploaded";
+    return structuredResult(result, `${what}: ${result.filename}. Reference it as \`${result.markup}\`.`);
+  };
+  // Two calls rather than a conditional schema so each keeps its inferred argument type.
+  if (local) {
+    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: UploadAssetInput }, uploadHandler);
+  } else {
+    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: RemoteUploadAssetInput }, uploadHandler);
+  }
 
   server.registerTool(
     "list_files",

@@ -1,6 +1,7 @@
 export type MicropageErrorCode =
   | "NOT_LOGGED_IN"
   | "SESSION_EXPIRED"
+  | "AUTH_EXPIRED"
   | "HTTP"
   | "TIMEOUT"
   | "NETWORK"

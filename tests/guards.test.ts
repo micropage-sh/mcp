@@ -9,7 +9,7 @@ import {
   assertDeployTokenAllows,
   canonicalJson,
   elicitConfirmation,
-  readEnvFlags,
+  envPermissions,
   requireConfirm,
   requireConfirmMatch,
   requireConfirmationToken,
@@ -17,15 +17,16 @@ import {
 } from "../src/guards.js";
 import { createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 
-describe("env flags", () => {
+describe("envPermissions", () => {
   it("default every switch off", () => {
-    expect(readEnvFlags({})).toEqual({ allowSend: false, allowDelete: false, submissions: false });
+    expect(envPermissions({})).toEqual({ allowSend: false, allowDelete: false, allowSubmissions: false });
   });
 
   it("accept the usual truthy spellings only", () => {
     expect(
-      readEnvFlags({ MICROPAGE_MCP_ALLOW_SEND: "1", MICROPAGE_MCP_ALLOW_DELETE: "true", MICROPAGE_MCP_SUBMISSIONS: "0" }),
-    ).toEqual({ allowSend: true, allowDelete: true, submissions: false });
+      envPermissions({ MICROPAGE_MCP_ALLOW_SEND: "1", MICROPAGE_MCP_ALLOW_DELETE: "true", MICROPAGE_MCP_SUBMISSIONS: "0" }),
+    ).toEqual({ allowSend: true, allowDelete: true, allowSubmissions: false });
+    expect(envPermissions({ MICROPAGE_MCP_SUBMISSIONS: " on " }).allowSubmissions).toBe(true);
   });
 });
 
@@ -67,72 +68,99 @@ describe("requireConfirm", () => {
 
 describe("confirmation tokens", () => {
   const payload = { post_id: 4, updated_at: "2026-10-04T10:00:00Z", email_enabled: true, form_id: 2, recipients: 31 };
+  const SUB = "user-1";
+  const make = (options: { now?: () => number } = {}) => new ConfirmationTokens({ key: randomBytes(32), ...options });
 
-  it("round-trips for the same payload regardless of key order", () => {
-    const tokens = new ConfirmationTokens();
-    const token = tokens.mint(payload);
+  it("round-trips for the same user and payload regardless of key order", () => {
+    const tokens = make();
+    const token = tokens.mint(SUB, payload);
     const reordered = { recipients: 31, form_id: 2, email_enabled: true, updated_at: payload.updated_at, post_id: 4 };
-    expect(tokens.verify(token, reordered)).toEqual({ ok: true });
+    expect(tokens.verify(token, SUB, reordered)).toEqual({ ok: true });
+  });
+
+  it("rejects a token minted for another user", () => {
+    const tokens = make();
+    const token = tokens.mint("user-1", payload);
+    expect(tokens.verify(token, "user-2", payload)).toEqual({ ok: false, reason: "mismatch" });
+  });
+
+  it("cannot be confused by a sub that mimics the payload encoding", () => {
+    const tokens = make();
+    const token = tokens.mint('a","payload":{}', {});
+    expect(tokens.verify(token, "a", { payload: {} }).ok).toBe(false);
+  });
+
+  it("accepts a token from another instance with the same key (a remote secret shared across isolates)", () => {
+    const key = "k".repeat(48);
+    const token = new ConfirmationTokens({ key }).mint(SUB, payload);
+    expect(new ConfirmationTokens({ key }).verify(token, SUB, payload)).toEqual({ ok: true });
+  });
+
+  it("refuses a short key", () => {
+    expect(() => new ConfirmationTokens({ key: "short" })).toThrow(/at least 32/);
   });
 
   it("rejects a token whose signature was tampered with", () => {
-    const tokens = new ConfirmationTokens();
-    const token = tokens.mint(payload);
+    const tokens = make();
+    const token = tokens.mint(SUB, payload);
     const dot = token.indexOf(".");
     const i = dot + 10;
     const tampered = token.slice(0, i) + (token[i] === "A" ? "B" : "A") + token.slice(i + 1);
-    expect(tokens.verify(tampered, payload)).toEqual({ ok: false, reason: "mismatch" });
+    expect(tokens.verify(tampered, SUB, payload)).toEqual({ ok: false, reason: "mismatch" });
   });
 
   it("rejects a non-canonical encoding of a valid signature", () => {
-    const tokens = new ConfirmationTokens();
-    const token = tokens.mint(payload);
+    const tokens = make();
+    const token = tokens.mint(SUB, payload);
     // Flip only the padding bits of the last char: same bytes, different string.
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     const last = alphabet.indexOf(token.at(-1)!);
     const twin = token.slice(0, -1) + alphabet[last ^ 1];
-    expect(tokens.verify(twin, payload)).toEqual({ ok: false, reason: "mismatch" });
+    expect(tokens.verify(twin, SUB, payload)).toEqual({ ok: false, reason: "mismatch" });
   });
 
   it("rejects a token whose expiry was pushed out", () => {
-    const tokens = new ConfirmationTokens();
-    const [, sig] = tokens.mint(payload).split(".");
+    const tokens = make();
+    const [, sig] = tokens.mint(SUB, payload).split(".");
     const forged = `${(Date.now() + 10 ** 9).toString(36)}.${sig}`;
-    expect(tokens.verify(forged, payload)).toEqual({ ok: false, reason: "mismatch" });
+    expect(tokens.verify(forged, SUB, payload)).toEqual({ ok: false, reason: "mismatch" });
   });
 
   it("rejects when the underlying state changed since the preview", () => {
-    const tokens = new ConfirmationTokens();
-    const token = tokens.mint(payload);
-    expect(tokens.verify(token, { ...payload, updated_at: "2026-10-04T10:05:00Z" })).toEqual({
+    const tokens = make();
+    const token = tokens.mint(SUB, payload);
+    expect(tokens.verify(token, SUB, { ...payload, updated_at: "2026-10-04T10:05:00Z" })).toEqual({
       ok: false,
       reason: "mismatch",
     });
   });
 
   it("rejects a token minted by another process (different key)", () => {
-    const token = new ConfirmationTokens({ key: randomBytes(32) }).mint(payload);
-    expect(new ConfirmationTokens({ key: randomBytes(32) }).verify(token, payload).ok).toBe(false);
+    const token = make().mint(SUB, payload);
+    expect(make().verify(token, SUB, payload).ok).toBe(false);
   });
 
   it("expires", () => {
     let now = 1_000_000;
-    const tokens = new ConfirmationTokens({ now: () => now });
-    const token = tokens.mint(payload, 60_000);
+    const tokens = make({ now: () => now });
+    const token = tokens.mint(SUB, payload, 60_000);
     now += 60_001;
-    expect(tokens.verify(token, payload)).toEqual({ ok: false, reason: "expired" });
+    expect(tokens.verify(token, SUB, payload)).toEqual({ ok: false, reason: "expired" });
   });
 
   it("rejects garbage", () => {
-    expect(new ConfirmationTokens().verify("not a token", payload)).toEqual({ ok: false, reason: "malformed" });
+    expect(make().verify("not a token", SUB, payload)).toEqual({ ok: false, reason: "malformed" });
   });
 
   it("requireConfirmationToken tells the model to preview again", () => {
-    const tokens = new ConfirmationTokens();
-    expect(() => requireConfirmationToken(tokens, undefined, payload, "preview_post_send")).toThrow(
+    const tokens = make();
+    expect(() => requireConfirmationToken(tokens, undefined, SUB, payload, "preview_post_send")).toThrow(
       /Call preview_post_send again/,
     );
-    expect(() => requireConfirmationToken(tokens, tokens.mint(payload), payload, "preview_post_send")).not.toThrow();
+    expect(() => requireConfirmationToken(tokens, tokens.mint("user-2", payload), SUB, payload, "preview_post_send")).toThrow(
+      /another session or account/,
+    );
+    expect(() => requireConfirmationToken(tokens, tokens.mint(SUB, payload), SUB, payload, "preview_post_send")).not.toThrow();
   });
 
   it("canonicalJson sorts nested keys", () => {

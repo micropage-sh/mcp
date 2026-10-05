@@ -183,7 +183,7 @@ It returns counts only, never what visitors typed (that is list_submissions, whi
   );
 
   // Submissions are personal data typed by strangers; the user opts in.
-  if (!ctx.flags.submissions) return;
+  if (!ctx.permissions.allowSubmissions) return;
 
   server.registerTool(
     "list_submissions",

@@ -4,8 +4,8 @@ import * as z from "zod";
 import { RO } from "../annotations.js";
 import { isMicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
+import { LOGIN_HINT } from "../client/auth-provider.js";
 import { decodeJwtClaims } from "../client/jwt.js";
-import { LOGIN_HINT, SessionAuthProvider } from "../client/session-store.js";
 import { UPGRADE_MESSAGE, isPaidTier, type PlanTier } from "../client/tier.js";
 import type { ToolContext } from "../context.js";
 import { assertDeployTokenAllows } from "../guards.js";
@@ -15,7 +15,7 @@ export const WhoamiInput = z.object({}).strict();
 
 export const WhoamiOutput = z.object({
   logged_in: z.boolean(),
-  auth_mode: z.enum(["session", "deploy_token", "none"]),
+  auth_mode: z.enum(["session", "deploy_token", "oauth", "none"]),
   user_id: z.string().nullable(),
   email: z.string().nullable(),
   name: z.string().nullable(),
@@ -50,11 +50,11 @@ interface SubscriptionRow {
   current_period_end: string | null;
 }
 
-const AUTH_FAILURES = new Set(["NOT_LOGGED_IN", "SESSION_EXPIRED", "SESSION_UNREADABLE", "DEPLOY_TOKEN_INVALID"]);
+const AUTH_FAILURES = new Set(["NOT_LOGGED_IN", "SESSION_EXPIRED", "SESSION_UNREADABLE", "DEPLOY_TOKEN_INVALID", "AUTH_EXPIRED"]);
 
 export async function runWhoami(ctx: ToolContext): Promise<WhoamiResult> {
   assertDeployTokenAllows(ctx.auth, "whoami");
-  const configPath = ctx.auth instanceof SessionAuthProvider ? ctx.auth.path : null;
+  const configPath = ctx.auth.sessionPath ?? null;
   const base: WhoamiResult = {
     logged_in: false,
     auth_mode: ctx.auth.mode,
@@ -89,7 +89,8 @@ export async function runWhoami(ctx: ToolContext): Promise<WhoamiResult> {
       user = await ctx.http.request<AuthUser>("GET", `${ctx.config.supabaseUrl}/auth/v1/user`);
     } catch (err) {
       if (isMicropageError(err) && AUTH_FAILURES.has(err.code)) {
-        return { ...base, note: `The micropage login session is no longer valid. ${LOGIN_HINT}` };
+        const note = err.code === "AUTH_EXPIRED" ? err.message : `The micropage login session is no longer valid. ${LOGIN_HINT}`;
+        return { ...base, note };
       }
       throw err;
     }

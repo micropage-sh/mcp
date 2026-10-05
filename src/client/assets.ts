@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { readFile, stat } from "node:fs/promises";
-import { isIP } from "node:net";
-import { extname, isAbsolute } from "node:path";
 
 import { VERSION } from "../version.js";
 import { MicropageError, isMicropageError } from "./errors.js";
 import type { FetchLike, Http } from "./http.js";
+import { ipFamily, isPrivateAddress } from "./ip.js";
+
+export { isPrivateAddress };
 
 /** Same extensions and types as the CLI (cli/src/mime.js); upload-file stores whatever type it is sent. */
 export const ASSET_MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
@@ -28,6 +27,14 @@ const formatMb = (bytes: number): string => `${(bytes / MB).toFixed(bytes < 10 *
 // ---------------------------------------------------------------------------
 // Filename
 // ---------------------------------------------------------------------------
+
+/** path.extname for a bare filename: "" for no extension and for dotfiles such as ".png". */
+function extname(filename: string): string {
+  const base = filename.slice(filename.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || /^\.+$/.test(base)) return "";
+  return base.slice(dot);
+}
 
 /**
  * The stored filename is what `.page` markup references (`img: <- logo.png`),
@@ -153,16 +160,27 @@ export function assertContentMatchesExtension(filename: string, bytes: Uint8Arra
 
 export type AssetSource = { path: string } | { url: string } | { base64: string };
 
+/** Reads a `{path}` source, refusing anything over maxBytes. Only a local server has one. */
+export type PathLoader = (path: string, maxBytes: number) => Promise<Uint8Array>;
+
 export interface LoadSourceOptions {
   /** Used for `{url}` sources only; never sent micropage credentials. */
   fetch?: FetchLike;
-  /** Resolves `{url}` hostnames before each fetch; defaults to urlHostLookup.current. */
-  lookup?: HostLookup;
+  /**
+   * Resolves `{url}` hostnames before each fetch so private addresses are
+   * refused. Without one only IP-literal hosts and the denylist are checked,
+   * which is enough only where fetch itself cannot reach private networks.
+   */
+  lookup?: HostLookup | null;
+  /** Hostnames never fetched, checked on every redirect hop. */
+  deniedHosts?: HostDenylist;
+  /** Without one, `{path}` sources are refused. */
+  pathLoader?: PathLoader;
   maxBytes?: number;
   timeoutMs?: number;
 }
 
-function tooLarge(size: number | string, maxBytes: number): MicropageError {
+export function assetTooLarge(size: number | string, maxBytes: number): MicropageError {
   const shown = typeof size === "number" ? formatMb(size) : size;
   return new MicropageError(
     "ASSET_TOO_LARGE",
@@ -172,38 +190,29 @@ function tooLarge(size: number | string, maxBytes: number): MicropageError {
 
 export async function loadAssetSource(source: AssetSource, options: LoadSourceOptions = {}): Promise<Buffer> {
   const maxBytes = options.maxBytes ?? MAX_ASSET_BYTES;
-  if ("path" in source) return loadPath(source.path, maxBytes);
+  if ("path" in source) {
+    if (!options.pathLoader) {
+      throw new MicropageError(
+        "INVALID_SOURCE",
+        "source.path is not available on this server: it cannot read files from the user's machine. " +
+          "Pass the image as source.base64, or as source.url if it is on a public https host.",
+      );
+    }
+    const bytes = await options.pathLoader(source.path, maxBytes);
+    if (bytes.length > maxBytes) throw assetTooLarge(bytes.length, maxBytes);
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
   if ("url" in source) {
     return loadUrl(source.url, {
       maxBytes,
       timeoutMs: options.timeoutMs ?? URL_FETCH_TIMEOUT_MS,
       fetchImpl: options.fetch ?? ((i, init) => fetch(i, init)),
-      lookup: options.lookup ?? urlHostLookup.current,
+      lookup: options.lookup ?? null,
+      denied: compileDenylist(options.deniedHosts),
+      localAlternative: options.pathLoader ? "source.path or source.base64" : "source.base64",
     });
   }
   return loadBase64(source.base64, maxBytes);
-}
-
-async function loadPath(path: string, maxBytes: number): Promise<Buffer> {
-  if (!isAbsolute(path)) {
-    throw new MicropageError(
-      "INVALID_SOURCE",
-      `source.path "${path}" is relative. Pass an absolute path; the server's working directory is not the user's.`,
-    );
-  }
-  let info;
-  try {
-    info = await stat(path);
-  } catch (err) {
-    throw new MicropageError("INVALID_SOURCE", `Cannot read source.path "${path}": ${(err as NodeJS.ErrnoException).code ?? String(err)}.`, {
-      cause: err,
-    });
-  }
-  if (!info.isFile()) throw new MicropageError("INVALID_SOURCE", `source.path "${path}" is not a regular file.`);
-  if (info.size > maxBytes) throw tooLarge(info.size, maxBytes);
-  const bytes = await readFile(path);
-  if (bytes.length > maxBytes) throw tooLarge(bytes.length, maxBytes);
-  return bytes;
 }
 
 function loadBase64(raw: string, maxBytes: number): Buffer {
@@ -213,10 +222,10 @@ function loadBase64(raw: string, maxBytes: number): Buffer {
     throw new MicropageError("INVALID_SOURCE", "source.base64 is not valid base64. Pass the file bytes base64-encoded (a data: URL is fine).");
   }
   // Checked before decoding so an oversized argument is never materialized twice.
-  if (Math.floor((body.length * 3) / 4) > maxBytes + 2) throw tooLarge(Math.floor((body.length * 3) / 4), maxBytes);
+  if (Math.floor((body.length * 3) / 4) > maxBytes + 2) throw assetTooLarge(Math.floor((body.length * 3) / 4), maxBytes);
   // Node's base64 decoder also accepts the URL-safe alphabet.
   const bytes = Buffer.from(body, "base64");
-  if (bytes.length > maxBytes) throw tooLarge(bytes.length, maxBytes);
+  if (bytes.length > maxBytes) throw assetTooLarge(bytes.length, maxBytes);
   return bytes;
 }
 
@@ -228,84 +237,51 @@ function loadBase64(raw: string, maxBytes: number): Buffer {
 // so a model-supplied URL must not reach them, directly or via a redirect.
 // The check runs on every hop. fetch resolves the name again, so a DNS answer
 // that changes in between is not caught; that needs a pinned-address agent.
+// A hosted server also refuses its own infrastructure by name (deniedHosts),
+// since those hosts are public and would pass the address check.
 // ---------------------------------------------------------------------------
 
 export type HostLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string; family: number }>>;
 
-/** Swappable in tests so no real DNS query is made. */
-export const urlHostLookup: { current: HostLookup } = {
-  current: (hostname) => lookup(hostname, { all: true, verbatim: true }),
-};
+/**
+ * Hostnames `{url}` sources must not fetch. `exact` matches the host only;
+ * a `suffixes` entry matches the domain itself and every subdomain of it
+ * ("example.com" covers example.com and a.b.example.com, not badexample.com).
+ * Case and a trailing dot are ignored.
+ */
+export interface HostDenylist {
+  exact?: ReadonlyArray<string>;
+  suffixes?: ReadonlyArray<string>;
+}
+
+interface CompiledDenylist {
+  exact: ReadonlySet<string>;
+  suffixes: ReadonlyArray<string>;
+}
+
+const normaliseHost = (host: string): string => host.trim().toLowerCase().replace(/\.+$/, "");
+
+function compileDenylist(list: HostDenylist | undefined): CompiledDenylist {
+  return {
+    exact: new Set((list?.exact ?? []).map(normaliseHost).filter(Boolean)),
+    suffixes: (list?.suffixes ?? []).map((s) => normaliseHost(s).replace(/^\.+/, "")).filter(Boolean),
+  };
+}
+
+function matchesDenylist(host: string, denied: CompiledDenylist): boolean {
+  return denied.exact.has(host) || denied.suffixes.some((s) => host === s || host.endsWith(`.${s}`));
+}
 
 export const MAX_URL_REDIRECTS = 5;
 
-function ipv4Bytes(ip: string): number[] | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  const bytes = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : Number.NaN));
-  return bytes.every((b) => b >= 0 && b <= 255) ? bytes : null;
+interface HostCheck {
+  lookup: HostLookup | null;
+  denied: CompiledDenylist;
+  /** Named in the refusal, so the model knows what to use instead. */
+  localAlternative: string;
 }
 
-/** 16 bytes of an IPv6 address (zone id dropped), or null when it does not parse. */
-function ipv6Bytes(raw: string): number[] | null {
-  let ip = raw.split("%")[0]!;
-  let tail: number[] = [];
-  const lastColon = ip.lastIndexOf(":");
-  if (ip.slice(lastColon + 1).includes(".")) {
-    const v4 = ipv4Bytes(ip.slice(lastColon + 1));
-    if (!v4) return null;
-    tail = v4;
-    ip = `${ip.slice(0, lastColon + 1)}0:0`;
-  }
-  const halves = ip.split("::");
-  if (halves.length > 2) return null;
-  const groups = (h: string): string[] => (h === "" ? [] : h.split(":"));
-  const head = groups(halves[0]!);
-  const back = halves.length === 2 ? groups(halves[1]!) : [];
-  const fill = 8 - head.length - back.length;
-  if (halves.length === 1 ? fill !== 0 : fill < 1) return null;
-  const all = [...head, ...Array<string>(halves.length === 2 ? fill : 0).fill("0"), ...back];
-  const bytes: number[] = [];
-  for (const g of all) {
-    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
-    const n = parseInt(g, 16);
-    bytes.push(n >> 8, n & 0xff);
-  }
-  if (tail.length) bytes.splice(12, 4, ...tail);
-  return bytes;
-}
-
-function blockedV4([a, b]: number[]): boolean {
-  return (
-    a === 0 || // 0.0.0.0/8 "this network"
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b! >= 64 && b! <= 127) || // CGNAT 100.64/10
-    (a === 169 && b === 254) || // link-local, cloud metadata
-    (a === 172 && b! >= 16 && b! <= 31) ||
-    (a === 192 && b === 168) ||
-    a! >= 224 // multicast 224/4 and reserved 240/4, incl. broadcast
-  );
-}
-
-/** True for loopback, private, link-local, CGNAT, ULA, multicast and unspecified addresses, in any notation. */
-export function isPrivateAddress(ip: string): boolean {
-  const family = isIP(ip.split("%")[0]!);
-  if (family === 4) return blockedV4(ipv4Bytes(ip)!);
-  if (family !== 6) return true;
-  const b = ipv6Bytes(ip);
-  if (!b) return true;
-  const zeros = (n: number): boolean => b.slice(0, n).every((x) => x === 0);
-  // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible, which also covers :: and ::1).
-  if ((zeros(10) && b[10] === 0xff && b[11] === 0xff) || zeros(12)) return blockedV4(b.slice(12));
-  return (
-    (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) || // fe80::/10 link-local
-    (b[0]! & 0xfe) === 0xfc || // fc00::/7 unique local
-    b[0] === 0xff // ff00::/8 multicast
-  );
-}
-
-async function assertPublicHost(url: URL, lookupHost: HostLookup, redirected: boolean): Promise<void> {
+async function assertPublicHost(url: URL, check: HostCheck, redirected: boolean): Promise<void> {
   if (url.protocol !== "https:") {
     throw new MicropageError(
       "INVALID_SOURCE",
@@ -319,15 +295,23 @@ async function assertPublicHost(url: URL, lookupHost: HostLookup, redirected: bo
     new MicropageError(
       "INVALID_SOURCE",
       `source.url host ${url.hostname} is a private, local or reserved address (${address}). Only public https hosts are ` +
-        "fetched; upload a local file with source.path or source.base64 instead. Nothing was fetched.",
+        `fetched; upload a local file with ${check.localAlternative} instead. Nothing was fetched.`,
     );
-  if (isIP(host)) {
+  if (ipFamily(host)) {
     if (isPrivateAddress(host)) throw refuse(host);
     return;
   }
+  if (matchesDenylist(normaliseHost(host), check.denied)) {
+    throw new MicropageError(
+      "INVALID_SOURCE",
+      `source.url host ${url.hostname} is not fetched by this server. Pass the image from another public https host, ` +
+        `or upload it with ${check.localAlternative}. Nothing was fetched.`,
+    );
+  }
+  if (!check.lookup) return;
   let addresses: ReadonlyArray<{ address: string }>;
   try {
-    addresses = await lookupHost(host);
+    addresses = await check.lookup(host);
   } catch (err) {
     throw new MicropageError("NETWORK", `Could not resolve ${host}: ${err instanceof Error ? err.message : String(err)}. Check the URL.`, {
       cause: err,
@@ -338,16 +322,15 @@ async function assertPublicHost(url: URL, lookupHost: HostLookup, redirected: bo
   if (bad) throw refuse(bad.address);
 }
 
-interface LoadUrlOptions {
+interface LoadUrlOptions extends HostCheck {
   maxBytes: number;
   timeoutMs: number;
   fetchImpl: FetchLike;
-  lookup: HostLookup;
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, lookup: lookupHost }: LoadUrlOptions): Promise<Buffer> {
+async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, ...check }: LoadUrlOptions): Promise<Buffer> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -358,7 +341,7 @@ async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, lookup: lo
   const signal = AbortSignal.timeout(timeoutMs);
   let res: Response;
   for (let hop = 0; ; hop++) {
-    await assertPublicHost(url, lookupHost, hop > 0);
+    await assertPublicHost(url, check, hop > 0);
     try {
       res = await fetchImpl(url.toString(), {
         method: "GET",
@@ -401,7 +384,7 @@ async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, lookup: lo
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => undefined);
-    throw tooLarge(declared, maxBytes);
+    throw assetTooLarge(declared, maxBytes);
   }
 
   // Content-Length can be absent or wrong, so the cap is enforced while reading.
@@ -416,7 +399,7 @@ async function loadUrl(raw: string, { maxBytes, timeoutMs, fetchImpl, lookup: lo
         total += value.byteLength;
         if (total > maxBytes) {
           await reader.cancel().catch(() => undefined);
-          throw tooLarge(`over ${formatMb(maxBytes)}`, maxBytes);
+          throw assetTooLarge(`over ${formatMb(maxBytes)}`, maxBytes);
         }
         chunks.push(value);
       }

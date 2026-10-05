@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Writes package.json's version into server.json (top level and every npm
- * package entry), so package.json is the only place a version is ever typed.
- * Runs from the npm `version` lifecycle, which stages server.json into the
- * version commit.
+ * package entry) and src/version.ts, so package.json is the only place a
+ * version is ever typed. Runs from the npm `version` lifecycle, which stages
+ * both into the version commit.
  *
  *   npm version patch        # bumps package.json, then runs this
  *   node scripts/sync-version.mjs
@@ -24,3 +24,19 @@ for (const p of server.packages ?? []) {
 
 writeFileSync(serverPath, JSON.stringify(server, null, 2) + "\n");
 console.log(`server.json -> ${pkg.version}`);
+
+const versionPath = join(MCP_DIR, "src", "version.ts");
+writeFileSync(versionPath, versionModule(pkg.name, pkg.version));
+console.log(`src/version.ts -> ${pkg.version}`);
+
+function versionModule(name, version) {
+  return [
+    "// Generated from package.json by scripts/sync-version.mjs; do not edit.",
+    "// A constant rather than a runtime read so the server needs no filesystem",
+    "// (the remote entry runs where there is none); `npm run check` and a test",
+    "// fail if it drifts from package.json.",
+    `export const PACKAGE_NAME = ${JSON.stringify(name)};`,
+    `export const VERSION = ${JSON.stringify(version)};`,
+    "",
+  ].join("\n");
+}

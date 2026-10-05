@@ -7,14 +7,7 @@ import {
   type ServerContext,
 } from "@modelcontextprotocol/server";
 
-import type { AuthProvider } from "./client/auth-provider.js";
-import { loadConfig, type MicropageConfig } from "./client/config.js";
-import { DeployTokenAuthProvider, readDeployTokenEnv } from "./client/deploy-token.js";
-import { Http, type FetchLike } from "./client/http.js";
-import { SessionAuthProvider, sessionFilePath } from "./client/session-store.js";
-import { PlanGate } from "./client/tier.js";
 import type { ServerDeps, ToolContext } from "./context.js";
-import { readEnvFlags } from "./guards.js";
 import { LIST_CACHE_HINTS, registerReference } from "./reference.js";
 import { registerAccountTools } from "./tools/account.js";
 import { registerBuildTools } from "./tools/builds.js";
@@ -26,44 +19,14 @@ import { VERSION } from "./version.js";
 
 export const SERVER_NAME = "micropage";
 
-export interface CreateDepsOptions {
-  /** Replaces global fetch for every outbound call (tests). */
-  fetch?: FetchLike;
-  now?: () => number;
-}
-
-/**
- * Picks where tokens come from: a deploy token when MICROPAGE_DEPLOY_TOKEN and
- * MICROPAGE_DEPLOY_PROJECT are both set (only one set throws), else the CLI
- * session file. The session provider is used even when the file does not
- * exist yet, so a `micropage login` after the server started takes effect
- * without a restart; until then every call fails with NOT_LOGGED_IN.
- */
-export function createAuthProvider(env: NodeJS.ProcessEnv, config: MicropageConfig, options: CreateDepsOptions = {}): AuthProvider {
-  const shared = {
-    config,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-    ...(options.now ? { now: options.now } : {}),
-  };
-  const deploy = readDeployTokenEnv(env);
-  if (deploy) return new DeployTokenAuthProvider({ ...shared, ...deploy });
-  return new SessionAuthProvider({ ...shared, path: sessionFilePath(env) });
-}
-
-/** Builds the process-wide deps from the environment. */
-export function createDeps(env: NodeJS.ProcessEnv = process.env, options: CreateDepsOptions = {}): ServerDeps {
-  const config = loadConfig(env);
-  const auth = createAuthProvider(env, config, options);
-  const http = new Http({ config, auth, ...(options.fetch ? { fetch: options.fetch } : {}) });
-  const tier = new PlanGate({ http, auth, ...(options.now ? { now: options.now } : {}) });
-  return { config, auth, http, tier, flags: readEnvFlags(env) };
-}
-
 /**
  * Builds one server instance. Transport-agnostic and factory-shaped on
  * purpose: serveStdio calls it once per connection (plus a discarded
- * discovery probe) and a future HTTP entry would call it per request, so all
+ * discovery probe) and a remote HTTP entry would call it per request, so all
  * long-lived state (token refresh, caches) lives in `deps`, never here.
+ * Nothing reachable from here may import a Node-only module (node:fs,
+ * node:os, node:dns, node:net, node:path); tests/architecture.test.ts
+ * enforces it. Node-only deps are built in src/node/.
  */
 export function createServer(ctx: McpRequestContext, deps: ServerDeps): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { cacheHints: LIST_CACHE_HINTS });

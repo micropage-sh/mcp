@@ -4,14 +4,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { VERSION } from "../version.js";
-import type { AuthProvider } from "./auth-provider.js";
+import { LOGIN_HINT, type AuthProvider } from "./auth-provider.js";
 import type { MicropageConfig } from "./config.js";
 import { MicropageError } from "./errors.js";
 import type { FetchLike } from "./http.js";
 import { isJwtExpiring } from "./jwt.js";
 import { withFileLock, type LockOptions } from "./lock.js";
 
-export const LOGIN_HINT = "Run `micropage login` in a terminal, then retry.";
+export { LOGIN_HINT };
 
 /** Same location as the CLI (cli/src/auth.js), plus a MICROPAGE_CONFIG_DIR override. */
 export function configDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -174,6 +174,10 @@ export class SessionAuthProvider implements AuthProvider {
   }
 
   get path(): string {
+    return this.store.path;
+  }
+
+  get sessionPath(): string {
     return this.store.path;
   }
 

@@ -69,6 +69,23 @@ if (!existsSync("server.json")) {
   }
 }
 
+// src/version.ts is generated (the server reads no package.json at runtime),
+// so a hand edit of package.json leaves it behind.
+if (!existsSync("src/version.ts")) {
+  problems.push(`src/version.ts is missing. Run node scripts/sync-version.mjs.`);
+} else {
+  const versionTs = readFileSync("src/version.ts", "utf8");
+  const found = Object.fromEntries(
+    [...versionTs.matchAll(/export const (\w+) = ("[^"]*");/g)].map((m) => [m[1], JSON.parse(m[2])])
+  );
+  if (found.VERSION !== pkg.version || found.PACKAGE_NAME !== pkg.name) {
+    problems.push(
+      `src/version.ts says ${found.PACKAGE_NAME}@${found.VERSION} but package.json is ${pkg.name}@${pkg.version}. ` +
+        `Run node scripts/sync-version.mjs (npm version does this for you).`
+    );
+  }
+}
+
 // Every emitted .js must trace back to a source file of the same name.
 if (existsSync("dist")) {
   const walk = (dir) =>
@@ -88,4 +105,4 @@ if (problems.length > 0) {
   console.error("Not publishable:\n" + problems.map((p) => `  - ${p}`).join("\n"));
   process.exit(1);
 }
-console.log("publishable: no local-path deps, server.json agrees with package.json, no stale dist files");
+console.log("publishable: no local-path deps, server.json and src/version.ts agree with package.json, no stale dist files");

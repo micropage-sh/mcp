@@ -27,15 +27,7 @@ import {
 import { getMaxProjectDeployEventId } from "../client/deploy-events.js";
 import { ProjectRef, resolveProject, type Project } from "../client/project-ref.js";
 import type { ToolContext } from "../context.js";
-import {
-  DEFAULT_TOKEN_TTL_MS,
-  confirmationTokens,
-  elicitConfirmation,
-  requireConfirm,
-  requireConfirmationToken,
-  type ConfirmationTokens,
-  type TokenPayload,
-} from "../guards.js";
+import { DEFAULT_TOKEN_TTL_MS, elicitConfirmation, requireConfirm, requireConfirmationToken, type TokenPayload } from "../guards.js";
 import { gateTool, structuredResult } from "./shared.js";
 
 const SlugInput = z
@@ -432,11 +424,7 @@ export const PreviewPostSendOutput = z.object({
 });
 export type PreviewPostSendResult = z.infer<typeof PreviewPostSendOutput>;
 
-export async function runPreviewPostSend(
-  ctx: ToolContext,
-  args: z.infer<typeof PreviewPostSendInput>,
-  tokens: ConfirmationTokens = confirmationTokens,
-): Promise<PreviewPostSendResult> {
+export async function runPreviewPostSend(ctx: ToolContext, args: z.infer<typeof PreviewPostSendInput>): Promise<PreviewPostSendResult> {
   await gateTool(ctx, "preview_post_send");
   const project = await resolveProject(ctx, args.project);
   const post = await loadPost(ctx, project, args.slug);
@@ -447,7 +435,8 @@ export async function runPreviewPostSend(
     facts.willEmail ? countActiveSubscribers(ctx.http, post.form_id!) : Promise.resolve(0),
   ]);
 
-  const blocked = facts.willEmail && !ctx.flags.allowSend;
+  const sub = await ctx.tier.currentUserId();
+  const blocked = facts.willEmail && !ctx.permissions.allowSend;
   return {
     project: projectBrief(project),
     post: {
@@ -463,10 +452,10 @@ export async function runPreviewPostSend(
     recipient_count: recipients,
     already_published: facts.alreadyPublished,
     resend_warning: facts.willEmail && facts.alreadyPublished ? RESEND_WARNING : null,
-    send_allowed: ctx.flags.allowSend,
+    send_allowed: ctx.permissions.allowSend,
     publish_allowed: !blocked,
     blocked_reason: blocked ? SEND_DISABLED : null,
-    confirmation_token: tokens.mint(facts.tokenPayload),
+    confirmation_token: ctx.confirmationTokens.mint(sub, facts.tokenPayload),
     expires_in_seconds: Math.round(DEFAULT_TOKEN_TTL_MS / 1000),
   };
 }
@@ -508,17 +497,17 @@ export async function runPublishPost(
   ctx: ToolContext,
   args: z.infer<typeof PublishPostInput>,
   handlerCtx?: ServerContext,
-  tokens: ConfirmationTokens = confirmationTokens,
 ): Promise<PublishPostOutcome> {
   await gateTool(ctx, "publish_post");
   const project = await resolveProject(ctx, args.project);
   const post = await loadPost(ctx, project, args.slug);
   const facts = sendFacts(project, post);
 
-  if (facts.willEmail && !ctx.flags.allowSend) {
+  if (facts.willEmail && !ctx.permissions.allowSend) {
     throw new MicropageError("SEND_DISABLED", `"${post.slug}" is set to email its list when published. ${SEND_DISABLED} Nothing was changed.`);
   }
-  requireConfirmationToken(tokens, args.confirmation_token, facts.tokenPayload, "preview_post_send");
+  const sub = await ctx.tier.currentUserId();
+  requireConfirmationToken(ctx.confirmationTokens, args.confirmation_token, sub, facts.tokenPayload, "preview_post_send");
 
   if (facts.willEmail && handlerCtx) {
     const [lists, recipients] = await Promise.all([

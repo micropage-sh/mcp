@@ -29,7 +29,7 @@
     "sync-content": "node scripts/sync-content.mjs",
     "check-content": "node scripts/check-content-drift.mjs",
     "sync-version": "node scripts/sync-version.mjs",
-    "version": "node scripts/sync-version.mjs && git add server.json"
+    "version": "node scripts/sync-version.mjs && git add server.json src/version.ts"
   },
   "keywords": [
     "mcp",

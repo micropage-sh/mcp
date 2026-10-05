@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DeployTokenAuthProvider, readDeployTokenEnv } from "../src/client/deploy-token.js";
 import { MicropageError } from "../src/client/errors.js";
 import { SessionAuthProvider } from "../src/client/session-store.js";
-import { createDeps } from "../src/server.js";
+import { createDeps } from "../src/node/deps.js";
 import { TEST_CONFIG, createFakeFetch, type ScriptedResponse } from "./helpers/fake-fetch.js";
 
 const UUID = "11111111-2222-3333-4444-555555555555";

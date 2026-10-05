@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 import {
   inputRequired,
@@ -10,21 +10,23 @@ import {
 
 import type { AuthProvider } from "./client/auth-provider.js";
 import { MicropageError } from "./client/errors.js";
-import type { EnvFlags } from "./context.js";
+import type { Permissions } from "./context.js";
 
 // ---------------------------------------------------------------------------
-// Env switches
+// Env switches (stdio's source of Permissions)
 // ---------------------------------------------------------------------------
 
 const truthy = (v: string | undefined): boolean => /^(1|true|yes|on)$/i.test(v?.trim() ?? "");
 
-export function readEnvFlags(env: NodeJS.ProcessEnv = process.env): EnvFlags {
+export function envPermissions(env: Readonly<Record<string, string | undefined>> = process.env): Permissions {
   return {
     allowSend: truthy(env.MICROPAGE_MCP_ALLOW_SEND),
     allowDelete: truthy(env.MICROPAGE_MCP_ALLOW_DELETE),
-    submissions: truthy(env.MICROPAGE_MCP_SUBMISSIONS),
+    allowSubmissions: truthy(env.MICROPAGE_MCP_SUBMISSIONS),
   };
 }
+
+export const NO_PERMISSIONS: Readonly<Permissions> = Object.freeze({ allowSend: false, allowDelete: false, allowSubmissions: false });
 
 // ---------------------------------------------------------------------------
 // Confirm arguments
@@ -61,10 +63,12 @@ export function requireConfirmMatch(
 // ---------------------------------------------------------------------------
 // Confirmation tokens
 //
-// A token binds a preview to the state it was taken over: the caller mints it
-// over a payload (e.g. post id, updated_at, email_enabled, form_id), and on
-// the follow-up call re-reads the current state and verifies against that. Any
-// change in between, a token from another process, or an edited token fails.
+// A token binds a preview to the state it was taken over and to the user it
+// was shown to: the caller mints it for the user's `sub` over a payload (e.g.
+// post id, updated_at, email_enabled, form_id), and on the follow-up call
+// re-reads the current state and verifies against that. Any change in
+// between, another user's token, a token signed with another key (another
+// stdio process, or a rotated remote secret), or an edited token fails.
 // ---------------------------------------------------------------------------
 
 export type TokenPayload = Readonly<Record<string, unknown>>;
@@ -75,21 +79,25 @@ export type TokenCheck =
 
 export const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000;
 
+/** HMAC key: random bytes per stdio process, a Worker secret remotely. */
+export type TokenKey = Uint8Array | string;
+
 export class ConfirmationTokens {
-  private readonly key: Buffer;
+  private readonly key: TokenKey;
   private readonly now: () => number;
 
-  constructor(options: { key?: Buffer; now?: () => number } = {}) {
-    this.key = options.key ?? randomBytes(32);
+  constructor(options: { key: TokenKey; now?: () => number }) {
+    if (options.key.length < 32) throw new Error("ConfirmationTokens needs a key of at least 32 bytes.");
+    this.key = options.key;
     this.now = options.now ?? Date.now;
   }
 
-  mint(payload: TokenPayload, ttlMs: number = DEFAULT_TOKEN_TTL_MS): string {
+  mint(sub: string, payload: TokenPayload, ttlMs: number = DEFAULT_TOKEN_TTL_MS): string {
     const expiresAt = this.now() + ttlMs;
-    return `${expiresAt.toString(36)}.${this.sign(expiresAt, payload)}`;
+    return `${expiresAt.toString(36)}.${this.sign(expiresAt, sub, payload)}`;
   }
 
-  verify(token: string, payload: TokenPayload): TokenCheck {
+  verify(token: string, sub: string, payload: TokenPayload): TokenCheck {
     const match = /^([0-9a-z]+)\.([A-Za-z0-9_-]+)$/.exec(token.trim());
     if (!match) return { ok: false, reason: "malformed" };
     const expiresAt = Number.parseInt(match[1]!, 36);
@@ -99,7 +107,7 @@ export class ConfirmationTokens {
     // Node's decoder ignores the trailing padding bits, so two different
     // strings can decode to the same bytes; only accept the canonical one.
     if (given.toString("base64url") !== match[2]) return { ok: false, reason: "mismatch" };
-    const expected = Buffer.from(this.sign(expiresAt, payload), "base64url");
+    const expected = Buffer.from(this.sign(expiresAt, sub, payload), "base64url");
     // Signature is checked before expiry so a forged timestamp reads as a
     // mismatch rather than leaking which part was wrong.
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
@@ -109,23 +117,21 @@ export class ConfirmationTokens {
     return { ok: true };
   }
 
-  private sign(expiresAt: number, payload: TokenPayload): string {
+  private sign(expiresAt: number, sub: string, payload: TokenPayload): string {
     return createHmac("sha256", this.key)
-      .update(`${expiresAt}\n${canonicalJson(payload)}`)
+      .update(`${expiresAt}\n${canonicalJson({ sub, payload })}`)
       .digest("base64url");
   }
 }
 
-/** Per-process instance; restarting the server invalidates every outstanding token. */
-export const confirmationTokens = new ConfirmationTokens();
-
 export function requireConfirmationToken(
   tokens: ConfirmationTokens,
   token: string | undefined,
+  sub: string,
   payload: TokenPayload,
   previewTool: string,
 ): void {
-  const check: TokenCheck = token ? tokens.verify(token, payload) : { ok: false, reason: "malformed" };
+  const check: TokenCheck = token ? tokens.verify(token, sub, payload) : { ok: false, reason: "malformed" };
   if (check.ok) return;
   const why =
     !token
@@ -133,7 +139,7 @@ export function requireConfirmationToken(
       : check.reason === "expired"
         ? "The confirmation_token has expired."
         : check.reason === "mismatch"
-          ? "The confirmation_token does not match the current state (it changed since the preview, or the token came from another session)."
+          ? "The confirmation_token does not match the current state (it changed since the preview, or the token came from another session or account)."
           : "The confirmation_token is not one this server issued.";
   throw new MicropageError(
     "CONFIRM_INVALID",
