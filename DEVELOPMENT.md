@@ -220,9 +220,13 @@ The only log lines are the ones `src/remote/log.ts` writes, which never
 include headers or bodies. Keep it that way when adding logging.
 
 **OAuth.** The authorization server is Supabase's OAuth 2.1 server (enabled
-on production, dynamic registration off, consent at
-`app.micropage.sh/oauth/consent`). Clients are pre-registered as public
-clients; redirect URIs are exact-match, which is why Claude Code needs
-`--callback-port 33418`. Revoking a grant makes `/auth/v1/user` refuse the
+on production, dynamic client registration ON, consent at
+`app.micropage.sh/oauth/consent`). Clients register themselves as public
+clients; because anyone can register under any name, the consent page shows
+the redirect host and warns when it isn't a known app (editor
+`app/utils/known-oauth-hosts.js`). Two pre-registered fallbacks exist: Claude
+(`14aaf8eb-e95a-4218-860d-c1755cdcee7b`) and Claude Code
+(`f1176948-266f-42af-9fe6-b285e023421c`, exact redirect
+`http://localhost:33418/callback`). Revoking a grant makes `/auth/v1/user` refuse the
 token at once, so the Worker stops within its 60 s verify cache; PostgREST
 and the build compiler keep accepting the JWT until it expires (up to 1 h).

@@ -31,11 +31,10 @@ Emailing subscribers, deleting projects and reading form submissions are off by 
 
 ## Hosted server
 
-micropage also hosts this server at `https://mcp.micropage.sh/mcp`. Clients connect over streamable HTTP and sign in with OAuth through the micropage account, so nothing is installed locally. Dynamic client registration is off, so each client uses a pre-registered client ID. Claude Code:
+micropage also hosts this server at `https://mcp.micropage.sh/mcp`. Clients connect over streamable HTTP and sign in with OAuth through the micropage account, so nothing is installed locally. Clients register themselves on first connect; in claude.ai just add a custom connector with the URL. Claude Code:
 
 ```sh
-claude mcp add --transport http --client-id f1176948-266f-42af-9fe6-b285e023421c --callback-port 33418 \
-  micropage https://mcp.micropage.sh/mcp
+claude mcp add --transport http micropage https://mcp.micropage.sh/mcp
 ```
 
 The setup for claude.ai and Claude Desktop, the per-connection permissions, and the deploy-token headers for headless use are in [Hosted server](https://docs.micropage.sh/docs/mcp/remote/).
