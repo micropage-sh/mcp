@@ -46,11 +46,12 @@ exists, so the first version goes out manually:
 `package.json` is the only place a version is typed. `npm version` bumps it
 and then runs the `version` script, which runs `scripts/sync-version.mjs` to
 copy the version into `server.json` (top level and the npm package entry) and
-stages it into the same commit. `src/version.ts` reads package.json at
-runtime, so the server never reports a third copy.
+regenerate `src/version.ts`, and stages both into the same commit.
+`src/version.ts` is a generated constant (the hosted Worker has no
+filesystem to read package.json from); do not edit it by hand.
 
 `npm run check` (in CI, the publish job and `prepublishOnly`) fails when
-`server.json` disagrees with `package.json`, when its `name` differs from
+`server.json` or `src/version.ts` disagrees with `package.json`, when its `name` differs from
 `mcpName`, or when its description is over the registry's 100-character
 limit. If you edited `package.json` by hand, `npm run sync-version` fixes it.
 
