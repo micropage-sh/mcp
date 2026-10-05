@@ -58,11 +58,16 @@ function blockedV4([a, b]: number[]): boolean {
     (a === 169 && b === 254) || // link-local, cloud metadata
     (a === 172 && b! >= 16 && b! <= 31) ||
     (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) || // benchmarking 198.18/15
     a! >= 224 // multicast 224/4 and reserved 240/4, incl. broadcast
   );
 }
 
-/** True for loopback, private, link-local, CGNAT, ULA, multicast and unspecified addresses, in any notation. */
+/**
+ * True for loopback, private, link-local, CGNAT, benchmarking, ULA, multicast
+ * and unspecified addresses, in any notation, and for the NAT64 (64:ff9b::/96)
+ * and 6to4 (2002::/16) prefixes, which can carry any IPv4 address, private ones included.
+ */
 export function isPrivateAddress(ip: string): boolean {
   const v4 = ipv4Bytes(ip);
   if (v4) return blockedV4(v4);
@@ -74,6 +79,8 @@ export function isPrivateAddress(ip: string): boolean {
   return (
     (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) || // fe80::/10 link-local
     (b[0]! & 0xfe) === 0xfc || // fc00::/7 unique local
-    b[0] === 0xff // ff00::/8 multicast
+    b[0] === 0xff || // ff00::/8 multicast
+    (b[0] === 0x20 && b[1] === 0x02) || // 2002::/16 6to4
+    (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && b.slice(4, 12).every((x) => x === 0)) // 64:ff9b::/96 NAT64
   );
 }

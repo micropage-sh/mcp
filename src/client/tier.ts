@@ -1,3 +1,4 @@
+import type { ModeHints } from "../hints.js";
 import { currentUserId, type AuthProvider } from "./auth-provider.js";
 import { MicropageError, PRICING_URL } from "./errors.js";
 import { eq, type Http } from "./http.js";
@@ -65,6 +66,8 @@ export interface PlanGateOptions {
   ttlMs?: number;
   /** Shared across gates (one per request on the remote server). */
   cache?: PlanTierCache;
+  /** Wording of the no-user-id error. Defaults to the stdio wording. */
+  hints?: Pick<ModeHints, "tokenNoUser">;
 }
 
 /**
@@ -78,6 +81,7 @@ export class PlanGate {
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly cache: PlanTierCache;
+  private readonly hints: Pick<ModeHints, "tokenNoUser"> | undefined;
 
   constructor(options: PlanGateOptions) {
     this.http = options.http;
@@ -85,11 +89,12 @@ export class PlanGate {
     this.now = options.now ?? Date.now;
     this.ttlMs = options.ttlMs ?? PLAN_CACHE_TTL_MS;
     this.cache = options.cache ?? new PlanTierCache();
+    this.hints = options.hints;
   }
 
   /** The signed-in user's id, read from the access token's `sub`. */
   currentUserId(): Promise<string> {
-    return currentUserId(this.auth);
+    return currentUserId(this.auth, this.hints);
   }
 
   /**

@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import { currentUserId, type AuthProvider } from "../src/client/auth-provider.js";
 import { BearerAuthProvider } from "../src/client/bearer-auth.js";
 import { MicropageError } from "../src/client/errors.js";
+import { PlanGate } from "../src/client/tier.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS, REMOTE_OAUTH_HINTS } from "../src/hints.js";
+import { makeJwt } from "./helpers/session.js";
 import { createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 import { tokenFor } from "./helpers/session.js";
 
@@ -39,5 +42,20 @@ describe("BearerAuthProvider", () => {
 
   it("exposes the user id through the token's sub", async () => {
     expect(await currentUserId(new BearerAuthProvider(token))).toBe("user-9");
+  });
+});
+
+describe("currentUserId wording", () => {
+  const noSub: AuthProvider = { mode: "oauth", getAccessToken: async () => makeJwt({ exp: 4_000_000_000 }) };
+
+  it("keeps the stdio wording by default and drops `micropage login` for a hosted connection", async () => {
+    await expect(currentUserId(noSub)).rejects.toMatchObject({ code: "SESSION_EXPIRED", message: expect.stringMatching(/micropage login/) });
+    for (const hints of [REMOTE_OAUTH_HINTS, REMOTE_DEPLOY_TOKEN_HINTS]) {
+      const err = (await currentUserId(noSub, hints).catch((e: unknown) => e)) as MicropageError;
+      expect(err.message).toBe(hints.tokenNoUser);
+      expect(err.message).not.toMatch(/micropage login|MICROPAGE_/);
+      const gate = new PlanGate({ http: makeHttp(createFakeFetch(), noSub), auth: noSub, hints });
+      await expect(gate.currentUserId()).rejects.toMatchObject({ message: hints.tokenNoUser });
+    }
   });
 });

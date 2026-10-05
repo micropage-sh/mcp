@@ -1,3 +1,4 @@
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { MicropageError } from "./errors.js";
 import { decodeJwtClaims } from "./jwt.js";
 
@@ -25,10 +26,10 @@ export interface AuthProvider {
 }
 
 /** The signed-in user's id, read from the current access token's `sub`. */
-export async function currentUserId(auth: AuthProvider): Promise<string> {
+export async function currentUserId(auth: AuthProvider, hints: Pick<ModeHints, "tokenNoUser"> = STDIO_HINTS): Promise<string> {
   const sub = decodeJwtClaims(await auth.getAccessToken())?.sub;
   if (typeof sub !== "string" || !sub) {
-    throw new MicropageError("SESSION_EXPIRED", "The micropage access token has no user id. Run `micropage login` in a terminal, then retry.");
+    throw new MicropageError("SESSION_EXPIRED", hints.tokenNoUser);
   }
   return sub;
 }

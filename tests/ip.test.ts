@@ -25,3 +25,29 @@ describe("isPrivateAddress (pure)", () => {
     expect(isPrivateAddress("1.2.3.4%x")).toBe(true);
   });
 });
+
+describe("isPrivateAddress: transition and benchmarking ranges", () => {
+  it("refuses NAT64 64:ff9b::/96, 6to4 2002::/16 and 198.18.0.0/15", () => {
+    for (const ip of [
+      "64:ff9b::a00:1",
+      "64:ff9b::10.0.0.1",
+      "64:ff9b::8.8.8.8",
+      "64:FF9B::7f00:1",
+      "2002::1",
+      "2002:c0a8:101::1",
+      "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      "198.18.0.0",
+      "198.18.0.1",
+      "198.19.255.255",
+      "::ffff:198.18.0.1",
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
+  it("keeps the public neighbours of those ranges public", () => {
+    for (const ip of ["198.17.255.255", "198.20.0.0", "64:ff9b:0:0:0:1::1", "64:ff9a::1", "2001:db9::1", "2003::1", "2606:4700::6810:84e5"]) {
+      expect(isPrivateAddress(ip), ip).toBe(false);
+    }
+  });
+});

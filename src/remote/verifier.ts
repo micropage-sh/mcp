@@ -6,6 +6,7 @@ import { isMicropageError } from "../client/errors.js";
 import type { FetchLike } from "../client/http.js";
 import { decodeJwtClaims } from "../client/jwt.js";
 import { isProjectUuid } from "../client/project-ref.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS } from "../hints.js";
 import { VERSION } from "../version.js";
 import { BoundedCache } from "./cache.js";
 import { sha256Hex } from "./log.js";
@@ -106,6 +107,11 @@ export class OAuthAccessTokenVerifier {
     return check;
   }
 
+  /** True when verify() would answer this token from the cache, without asking Supabase. */
+  async isCached(token: string): Promise<boolean> {
+    return this.cache.get(await sha256Hex(token)) !== undefined;
+  }
+
   clear(): void {
     this.cache.clear();
   }
@@ -157,11 +163,11 @@ export class DeployTokenVerifier {
   }
 
   async verify(token: string, projectHeader: string | null): Promise<Extract<VerifiedAuth, { kind: "deploy_token" }>> {
-    const projectUuid = projectHeader?.trim().toLowerCase() ?? "";
+    const projectUuid = normaliseProject(projectHeader);
     if (!isProjectUuid(projectUuid)) {
       throw invalid("A deploy token needs the X-Micropage-Project header set to the project's uuid.");
     }
-    const tokenHash = await sha256Hex(`${token}\n${projectUuid}`);
+    const tokenHash = await deployKey(token, projectUuid);
     let provider = this.providers.get(tokenHash);
     if (!provider) {
       provider = new DeployTokenAuthProvider({
@@ -171,6 +177,7 @@ export class DeployTokenVerifier {
         fetch: this.options.fetch,
         now: this.options.now,
         ttlSeconds: REMOTE_DEPLOY_TOKEN_TTL_SECONDS,
+        hints: REMOTE_DEPLOY_TOKEN_HINTS,
         ...(this.options.timeoutMs !== undefined ? { timeoutMs: this.options.timeoutMs } : {}),
       });
     }
@@ -202,9 +209,34 @@ export class DeployTokenVerifier {
     };
   }
 
+  /** True when verify() would answer from a kept provider's JWT, without an exchange. */
+  async isCached(token: string, projectHeader: string | null): Promise<boolean> {
+    const projectUuid = normaliseProject(projectHeader);
+    if (!isProjectUuid(projectUuid)) return false;
+    return this.providers.get(await deployKey(token, projectUuid))?.hasFreshToken() ?? false;
+  }
+
   clear(): void {
     this.providers.clear();
   }
+}
+
+const normaliseProject = (header: string | null): string => header?.trim().toLowerCase() ?? "";
+const deployKey = (token: string, projectUuid: string): Promise<string> => sha256Hex(`${token}\n${projectUuid}`);
+
+/**
+ * True when the request's credential is already verified in this isolate, so
+ * checking it again costs no upstream call. Parses the header as the SDK's
+ * verifyBearerToken does; anything it would refuse counts as not cached.
+ */
+export async function isCachedCredential(
+  request: Request,
+  oauth: OAuthAccessTokenVerifier,
+  deploy: DeployTokenVerifier,
+): Promise<boolean> {
+  const [type, token] = (request.headers.get("authorization") ?? "").split(" ");
+  if (type?.toLowerCase() !== "bearer" || !token) return false;
+  return isDeployToken(token) ? deploy.isCached(token, request.headers.get(PROJECT_HEADER)) : oauth.isCached(token);
 }
 
 /**

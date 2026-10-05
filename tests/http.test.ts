@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MicropageError, planRequiredError } from "../src/client/errors.js";
 import { Http, eq, inList } from "../src/client/http.js";
 import { publishPost } from "../src/client/posts.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS, REMOTE_OAUTH_HINTS } from "../src/hints.js";
 import { VERSION } from "../src/version.js";
 import { FakeAuth, TEST_CONFIG, createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 
@@ -54,6 +55,20 @@ describe("Http 401 handling", () => {
     expect((err as MicropageError).message).toMatch(/micropage login/);
     expect(fake.calls).toHaveLength(2);
     expect(auth.refreshCount).toBe(1);
+  });
+
+  it("words the final 401 for a hosted connection without `micropage login`", async () => {
+    for (const hints of [REMOTE_OAUTH_HINTS, REMOTE_DEPLOY_TOKEN_HINTS]) {
+      const fake = createFakeFetch({ status: 401 }, { status: 401 });
+      const http = new Http({ config: TEST_CONFIG, auth: new FakeAuth(["old", "new"]), fetch: fake.fetch, hints });
+      const err = (await http.select("projects").catch((e: unknown) => e)) as MicropageError;
+      expect(err.code).toBe("SESSION_EXPIRED");
+      expect(err.message).toBe(hints.sessionInvalid);
+      expect(err.message).not.toMatch(/micropage login|MICROPAGE_/);
+    }
+    const head = createFakeFetch({ status: 401 });
+    const http = new Http({ config: TEST_CONFIG, auth: new FakeAuth(["only"]), fetch: head.fetch, hints: REMOTE_OAUTH_HINTS });
+    await expect(http.count("projects")).rejects.toMatchObject({ message: REMOTE_OAUTH_HINTS.sessionInvalid });
   });
 
   it("does not retry when the provider has no new token", async () => {

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DeployTokenAuthProvider, readDeployTokenEnv } from "../src/client/deploy-token.js";
 import { MicropageError } from "../src/client/errors.js";
 import { SessionAuthProvider } from "../src/client/session-store.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS } from "../src/hints.js";
 import { createDeps } from "../src/node/deps.js";
 import { TEST_CONFIG, createFakeFetch, type ScriptedResponse } from "./helpers/fake-fetch.js";
 
@@ -162,5 +163,42 @@ describe("DeployTokenAuthProvider", () => {
       code: "DEPLOY_TOKEN_INVALID",
       status: 403,
     });
+  });
+});
+
+describe("DeployTokenAuthProvider wording for a hosted connection", () => {
+  const make = (status: number, body: unknown) =>
+    new DeployTokenAuthProvider({
+      config: TEST_CONFIG,
+      token: "mpd_secret",
+      projectUuid: UUID,
+      fetch: createFakeFetch({ status, body }).fetch,
+      hints: REMOTE_DEPLOY_TOKEN_HINTS,
+    });
+
+  it("points at the connector settings, never at env vars", async () => {
+    const rejected = (await make(403, { error: "Invalid deploy token" }).getAccessToken().catch((e: unknown) => e)) as MicropageError;
+    expect(rejected.code).toBe("DEPLOY_TOKEN_INVALID");
+    expect(rejected.message).toBe(`The deploy token was rejected (Invalid deploy token). ${REMOTE_DEPLOY_TOKEN_HINTS.deployTokenCheck}`);
+    const missing = (await make(404, { error: "Project not found" }).getAccessToken().catch((e: unknown) => e)) as MicropageError;
+    expect(missing.message).toBe(`No project with uuid ${UUID} exists (Project not found). ${REMOTE_DEPLOY_TOKEN_HINTS.deployProjectCheck}`);
+    for (const err of [rejected, missing]) expect(err.message).not.toMatch(/MICROPAGE_|micropage login/);
+  });
+
+  it("reports whether the cached JWT is fresh enough to skip an exchange", async () => {
+    const nowSec = 1_800_000_000;
+    const clock = { now: nowSec * 1000 };
+    const auth = new DeployTokenAuthProvider({
+      config: TEST_CONFIG,
+      token: "mpd_secret",
+      projectUuid: UUID,
+      fetch: createFakeFetch(exchanged("jwt-1", nowSec + 300)).fetch,
+      now: () => clock.now,
+    });
+    expect(auth.hasFreshToken()).toBe(false);
+    await auth.getAccessToken();
+    expect(auth.hasFreshToken()).toBe(true);
+    clock.now = (nowSec + 241) * 1000;
+    expect(auth.hasFreshToken()).toBe(false);
   });
 });

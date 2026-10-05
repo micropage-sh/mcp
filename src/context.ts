@@ -36,6 +36,8 @@ export interface UploadDeps {
   deniedHosts?: HostDenylist;
   /** fetch for `{url}` sources; never the micropage-authenticated client. Defaults to global fetch. */
   fetchExternal?: FetchLike;
+  /** Largest asset upload_asset accepts, in bytes; also what its description states. Defaults to MAX_ASSET_BYTES. */
+  maxBytes?: number;
 }
 
 /**

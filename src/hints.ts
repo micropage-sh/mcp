@@ -27,6 +27,16 @@ export interface ModeHints {
   loginInvalid: string;
   /** Appended to the deploy-token refusal: where the other tools are. */
   deployTokenElsewhere: string;
+  /** Error when the API answers 401 even after a forced token refresh. */
+  sessionInvalid: string;
+  /** Error when the access token carries no user id. */
+  tokenNoUser: string;
+  /** Follows "The deploy token was rejected (<detail>)." on a refused exchange. */
+  deployTokenCheck: string;
+  /** Follows "No project with uuid <uuid> exists (<detail>)." on a refused exchange. */
+  deployProjectCheck: string;
+  /** upload_asset description: which source to prefer; empty when there is no preference. */
+  uploadSourceNote: string;
 }
 
 export const STDIO_HINTS: ModeHints = Object.freeze({
@@ -46,12 +56,27 @@ export const STDIO_HINTS: ModeHints = Object.freeze({
   whoamiFix: "usually run `micropage login` in a terminal",
   loginInvalid: "The micropage login session is no longer valid. Run `micropage login` in a terminal, then retry.",
   deployTokenElsewhere: "Use a full `micropage login` session for anything else.",
+  sessionInvalid: "The micropage session is no longer valid. Ask the user to run `micropage login` in a terminal, then retry.",
+  tokenNoUser: "The micropage access token has no user id. Run `micropage login` in a terminal, then retry.",
+  deployTokenCheck:
+    "Ask the user to check MICROPAGE_DEPLOY_TOKEN, or to create a new token in the micropage editor under Settings > Deploy tokens.",
+  deployProjectCheck: "Ask the user to check MICROPAGE_DEPLOY_PROJECT.",
+  uploadSourceNote: "",
 });
 
 export const CONNECTED_APPS_URL = "https://app.micropage.sh/account/connected-apps";
 const CONNECTED_APPS = `Micropage → Connected AI apps (${CONNECTED_APPS_URL})`;
 const RECONNECT =
   "Ask the user to reconnect (re-authenticate) the micropage connector in their AI app, then retry.";
+const CHECK_CONNECTOR =
+  "Ask the user to check the deploy token and the X-Micropage-Project header in the connector settings, then retry.";
+const REMOTE_DEPLOY_TOKEN_CHECK =
+  "Ask the user to check the deploy token in the AI app's connector settings, or to create a new token in the micropage editor under Settings > Deploy tokens.";
+const REMOTE_DEPLOY_PROJECT_CHECK = "Ask the user to check the X-Micropage-Project header in the AI app's connector settings.";
+// Base64 travels through the model's context and the request body, which is
+// capped well below what a fetched URL may be.
+const REMOTE_UPLOAD_SOURCE_NOTE =
+  "Prefer source.url whenever the image is on a public https host; use source.base64 only for an image that is not hosted anywhere.";
 
 /** A hosted connection authorized through OAuth: permissions live on the user's Connected AI apps page. */
 export const REMOTE_OAUTH_HINTS: ModeHints = Object.freeze({
@@ -70,6 +95,11 @@ export const REMOTE_OAUTH_HINTS: ModeHints = Object.freeze({
   whoamiFix: "usually reconnect the micropage connector in their AI app",
   loginInvalid: `The micropage authorization for this connection is no longer valid. ${RECONNECT}`,
   deployTokenElsewhere: "Connect micropage to the AI app with the user's micropage account for anything else.",
+  sessionInvalid: `The micropage authorization for this connection is no longer valid. ${RECONNECT}`,
+  tokenNoUser: `The micropage authorization for this connection has no user id. ${RECONNECT}`,
+  deployTokenCheck: REMOTE_DEPLOY_TOKEN_CHECK,
+  deployProjectCheck: REMOTE_DEPLOY_PROJECT_CHECK,
+  uploadSourceNote: REMOTE_UPLOAD_SOURCE_NOTE,
 });
 
 /** A hosted connection on a project deploy token: no account-level settings apply. */
@@ -86,7 +116,11 @@ export const REMOTE_DEPLOY_TOKEN_HINTS: ModeHints = Object.freeze({
     "If list_submissions is not available, that is because reading form submissions is not available with a deploy token. Tell me that rather than looking for another way in.",
   whoamiModes: "whether it runs on the user's connected-app authorization (OAuth) or on a project deploy token (and if so, which project it is pinned to)",
   whoamiFix: "usually check the deploy token and the X-Micropage-Project header in the AI app's connector settings",
-  loginInvalid:
-    "The deploy token was rejected. Ask the user to check the deploy token and the X-Micropage-Project header in the connector settings, then retry.",
+  loginInvalid: `The deploy token was rejected. ${CHECK_CONNECTOR}`,
   deployTokenElsewhere: "Connect micropage to the AI app with the user's micropage account for anything else.",
+  sessionInvalid: `The deploy-token session is no longer valid. ${CHECK_CONNECTOR}`,
+  tokenNoUser: `The deploy-token session has no user id. ${CHECK_CONNECTOR}`,
+  deployTokenCheck: REMOTE_DEPLOY_TOKEN_CHECK,
+  deployProjectCheck: REMOTE_DEPLOY_PROJECT_CHECK,
+  uploadSourceNote: REMOTE_UPLOAD_SOURCE_NOTE,
 });

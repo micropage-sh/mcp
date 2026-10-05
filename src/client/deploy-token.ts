@@ -1,3 +1,4 @@
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { VERSION } from "../version.js";
 import type { AuthProvider } from "./auth-provider.js";
 import type { MicropageConfig } from "./config.js";
@@ -49,6 +50,8 @@ export interface DeployTokenAuthOptions extends DeployTokenEnv {
   now?: () => number;
   ttlSeconds?: number;
   timeoutMs?: number;
+  /** What a refused exchange tells the user to check. Defaults to the stdio wording (env vars). */
+  hints?: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck">;
 }
 
 interface ExchangeResponse {
@@ -77,6 +80,7 @@ export class DeployTokenAuthProvider implements AuthProvider {
   private readonly now: () => number;
   private readonly ttlSeconds: number;
   private readonly timeoutMs: number;
+  private readonly hints: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck">;
   private cached: { accessToken: string; expiresAtMs: number } | null = null;
   private inflight: Promise<string> | null = null;
 
@@ -88,11 +92,17 @@ export class DeployTokenAuthProvider implements AuthProvider {
     this.now = options.now ?? Date.now;
     this.ttlSeconds = options.ttlSeconds ?? DEPLOY_TOKEN_TTL_SECONDS;
     this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.hints = options.hints ?? STDIO_HINTS;
+  }
+
+  /** True when getAccessToken() would answer from the cached JWT, without an exchange. */
+  hasFreshToken(): boolean {
+    return this.cached !== null && this.cached.expiresAtMs - REEXCHANGE_SKEW_MS > this.now();
   }
 
   async getAccessToken(options: { forceRefresh?: boolean } = {}): Promise<string> {
     const cached = this.cached;
-    if (!options.forceRefresh && cached && cached.expiresAtMs - REEXCHANGE_SKEW_MS > this.now()) {
+    if (!options.forceRefresh && cached && this.hasFreshToken()) {
       return cached.accessToken;
     }
     this.inflight ??= this.exchange(options.forceRefresh ? cached?.accessToken : undefined).finally(() => {
@@ -143,15 +153,14 @@ export class DeployTokenAuthProvider implements AuthProvider {
     if (res.status === 401 || res.status === 403) {
       throw new MicropageError(
         "DEPLOY_TOKEN_INVALID",
-        `The deploy token was rejected (${detail}). Ask the user to check MICROPAGE_DEPLOY_TOKEN, or to create a new ` +
-          `token in the micropage editor under Settings > Deploy tokens.`,
+        `The deploy token was rejected (${detail}). ${this.hints.deployTokenCheck}`,
         { status: res.status, data },
       );
     }
     if (res.status === 404) {
       throw new MicropageError(
         "DEPLOY_TOKEN_INVALID",
-        `No project with uuid ${this.pinnedProjectUuid} exists (${detail}). Ask the user to check MICROPAGE_DEPLOY_PROJECT.`,
+        `No project with uuid ${this.pinnedProjectUuid} exists (${detail}). ${this.hints.deployProjectCheck}`,
         { status: 404, data },
       );
     }

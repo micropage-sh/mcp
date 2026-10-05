@@ -11,16 +11,28 @@ compatibility_flags = ["nodejs_compat"]
 
 # Served on workers.dev until mcp.micropage.sh is attached as a Custom Domain
 # in a later, coordinated step. No routes here: the micropage.sh zone's */*
-# route belongs to micropage-custom-hostnames-fallback.
+# route belongs to micropage-custom-hostnames-fallback. Once the Custom Domain
+# serves, set workers_dev = false so the Worker is reachable on one public
+# host only (the one RESOURCE_URL names).
 workers_dev = true
 
 [observability]
 enabled = true
 
+# Our own console.log lines (src/remote/log.ts) are written without secrets.
+# The platform's per-request invocation logs carry request metadata that this
+# code does not control, and Cloudflare does not document that they redact
+# the Authorization header, so they are off.
+[observability.logs]
+invocation_logs = false
+
 [vars]
 # Public URL of the MCP endpoint; the `resource` in the protected-resource
 # metadata. Replace with the real workers.dev URL before the first deploy, and
-# with https://mcp.micropage.sh/mcp once the Custom Domain is attached.
+# with https://mcp.micropage.sh/mcp once the Custom Domain is attached. Until
+# then the Worker answers /mcp and the metadata with 500 (and logs
+# config_error RESOURCE_URL_PLACEHOLDER): it refuses a URL containing REPLACE
+# or one that is not https.
 RESOURCE_URL = "https://micropage-mcp-remote.REPLACE-WITH-ACCOUNT-SUBDOMAIN.workers.dev/mcp"
 SUPABASE_URL = "https://vhlifcdslnmnvnvorluu.supabase.co"
 # Public anon key, the same one the editor and the CLI ship.
@@ -42,7 +54,8 @@ name = "USER_LIMITER"
 namespace_id = "5001"
 simple = { limit = 120, period = 60 }
 
-# Per-IP limit on requests that fail authentication (cf-connecting-ip).
+# Per-IP limit (cf-connecting-ip) on presented credentials this isolate has not
+# verified yet, checked before Supabase is asked about them.
 [[ratelimits]]
 name = "IP_LIMITER"
 namespace_id = "5002"

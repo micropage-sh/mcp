@@ -2,7 +2,8 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { PostRow } from "../src/client/posts.js";
-import { DENIED_HOSTS, type Env, type RateLimiter } from "../src/remote/config.js";
+import { DENIED_HOSTS, MAX_REQUEST_BODY_BYTES, REMOTE_MAX_ASSET_BYTES, deniedHostsFor, type Env, type RateLimiter } from "../src/remote/config.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS, REMOTE_OAUTH_HINTS } from "../src/hints.js";
 import { createWorker, type RemoteWorker } from "../src/remote/app.js";
 import { dohLookup } from "../src/remote/doh.js";
 import { makeJwt } from "./helpers/session.js";
@@ -28,7 +29,17 @@ interface Call {
 }
 
 interface Backend {
-  users: Record<string, "ok" | "revoked">;
+  /** "mismatch": /auth/v1/user answers with another user's id. */
+  users: Record<string, "ok" | "revoked" | "mismatch">;
+  /** /auth/v1/user waits for this before answering. */
+  userGate?: Promise<void>;
+  /** The permissions read fails with HTTP 500. */
+  permissionsFail?: boolean;
+  /** Every PostgREST call answers 401 (the API rejects the access token). */
+  restUnauthorized?: boolean;
+  /** exchange-deploy-token: the token is revoked (403) / the project is gone (404). */
+  deployRevoked?: boolean;
+  deployProjectGone?: boolean;
   planTier: string;
   permissions: { allow_send: boolean; allow_delete: boolean; allow_submissions: boolean } | null;
   posts: PostRow[];
@@ -41,6 +52,11 @@ interface Backend {
 let backend: Backend;
 let calls: Call[];
 let external: string[];
+/** Scripted answers for `{url}` fetches, by full URL; anything else is 404. */
+let externalRoutes: Record<string, () => Response>;
+/** Addresses lookupHost returns, by hostname; anything else is public. */
+let hostAddresses: Record<string, string>;
+let exchanges: number;
 let logs: string[];
 let worker: RemoteWorker;
 let client: Client | undefined;
@@ -90,8 +106,9 @@ async function route(input: string, init: RequestInit = {}): Promise<Response> {
 
   if (url.origin !== SUPABASE) {
     external.push(input);
-    return new Response("nope", { status: 404 });
+    return externalRoutes[input]?.() ?? new Response("nope", { status: 404 });
   }
+  if (backend.restUnauthorized && url.pathname.startsWith("/rest/v1/")) return json({ message: "JWT expired" }, 401);
   const bearer = headers.authorization?.replace(/^Bearer /, "") ?? "";
   const sub = (() => {
     try {
@@ -103,20 +120,29 @@ async function route(input: string, init: RequestInit = {}): Promise<Response> {
   switch (url.pathname) {
     case "/auth/v1/user": {
       const state = sub ? backend.users[sub] : undefined;
+      if (backend.userGate) await backend.userGate;
       if (state === "ok") return json({ id: sub, email: `${sub}@example.com` });
+      if (state === "mismatch") return json({ id: "someone-else", email: "someone-else@example.com" });
       return json({ code: 403, msg: "invalid claim: session not found" }, 403);
     }
     case "/functions/v1/exchange-deploy-token": {
       const req = body as { projectUuid?: string };
-      if (bearer !== DEPLOY_TOKEN || req.projectUuid !== backend.deployProject) return json({ error: "Invalid deploy token" }, 403);
+      if (backend.deployRevoked || bearer !== DEPLOY_TOKEN || req.projectUuid !== backend.deployProject) return json({ error: "Invalid deploy token" }, 403);
+      if (backend.deployProjectGone) return json({ error: "Project not found" }, 404);
       if (backend.deployPlanRequired) return json({ error: "Deploy tokens need the Pro+ plan.", code: "plan_required", required_tier: "pro_plus" }, 403);
       return json({
-        access_token: makeJwt({ sub: "deploy-owner", exp: Math.floor(Date.now() / 1000) + 300, role: "authenticated" }),
+        access_token: makeJwt({
+          sub: "deploy-owner",
+          exp: Math.floor(Date.now() / 1000) + 300,
+          role: "authenticated",
+          n: ++exchanges,
+        }),
         expires_in: 300,
         project_id: 7,
       });
     }
     case "/rest/v1/mcp_connection_permissions":
+      if (backend.permissionsFail) return json({ message: "boom" }, 500);
       return json(backend.permissions ? [backend.permissions] : []);
     case "/rest/v1/customers":
       return json([{ plan_tier: backend.planTier }]);
@@ -170,8 +196,8 @@ const INIT = {
   params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
 };
 
-async function connect(token: string, headers: Record<string, string> = {}, e: Env = env()): Promise<Client> {
-  const transport = new StreamableHTTPClientTransport(new URL(RESOURCE), {
+async function connect(token: string, headers: Record<string, string> = {}, e: Env = env(), endpoint = RESOURCE): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     fetch: (url, init) => worker.fetch(new Request(url, init), e),
     requestInit: { headers: { authorization: `Bearer ${token}`, ...headers } },
   });
@@ -192,12 +218,15 @@ beforeEach(() => {
   backend = { users: { "user-a": "ok", "user-b": "ok" }, planTier: "pro", permissions: null, posts: [post()], deployProject: UUID };
   calls = [];
   external = [];
+  externalRoutes = {};
+  hostAddresses = {};
+  exchanges = 0;
   logs = [];
   skewMs = 0;
   worker = createWorker({
     fetch: route,
     now: () => Date.now() + skewMs,
-    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
+    lookupHost: async (host) => [{ address: hostAddresses[host] ?? "93.184.216.34", family: 4 }],
     log: (line) => logs.push(line),
   });
 });
@@ -408,11 +437,12 @@ describe("serving", () => {
     expect(logs.some((l) => (JSON.parse(l) as { error_code?: string }).error_code === "PLAN_REQUIRED")).toBe(true);
   });
 
-  it("refuses a body over 15 MiB with 413", async () => {
+  it("refuses a body over 6 MiB with 413", async () => {
+    expect(MAX_REQUEST_BODY_BYTES).toBe(6 * 1024 * 1024);
     const res = await call("/mcp", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${oauthToken("user-a")}` },
-      body: JSON.stringify({ ...INIT, pad: "x".repeat(15 * 1024 * 1024 + 1) }),
+      body: JSON.stringify({ ...INIT, pad: "x".repeat(MAX_REQUEST_BODY_BYTES + 1) }),
     });
     expect(res.status).toBe(413);
   });
@@ -455,9 +485,50 @@ describe("origin and rate limits", () => {
     expect((await rpc("not-a-valid-token", INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(401);
     expect((await rpc("not-a-valid-token", INIT, { "cf-connecting-ip": "203.0.113.9" }, e)).status).toBe(429);
     expect(keys).toEqual(["ip:203.0.113.9", "ip:203.0.113.9"]);
-    // A verified request never touches the IP limiter.
-    expect((await rpc(oauthToken("user-a"), INIT, {}, e)).status).toBe(200);
+  });
+
+  it("checks the per-IP limit before verification, so an over-limit IP never reaches Supabase", async () => {
+    const keys: string[] = [];
+    const limiter: RateLimiter = { limit: async ({ key }) => (keys.push(key), { success: false }) };
+    const e = env({ IP_LIMITER: limiter });
+    const ip = { "cf-connecting-ip": "203.0.113.9" };
+    const presented: Array<[string, Record<string, string>]> = [
+      [oauthToken("user-a"), {}],
+      [DEPLOY_TOKEN, { "x-micropage-project": UUID }],
+      ["not-a-valid-token", {}],
+    ];
+    for (const [token, headers] of presented) {
+      const res = await rpc(token, INIT, { ...ip, ...headers }, e);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("60");
+      await res.text();
+    }
+    expect(calls).toHaveLength(0);
+    expect(keys).toEqual(["ip:203.0.113.9", "ip:203.0.113.9", "ip:203.0.113.9"]);
+    // A bare request stays uncounted even from an over-limit IP.
+    expect((await rpc(null, INIT, ip, e)).status).toBe(401);
+    expect(keys).toHaveLength(3);
+    expect(logs.filter((l) => (JSON.parse(l) as { error_code?: string }).error_code === "rate_limited")).toHaveLength(3);
+  });
+
+  it("does not count credentials this isolate has already verified", async () => {
+    const keys: string[] = [];
+    const limiter: RateLimiter = { limit: async ({ key }) => (keys.push(key), { success: true }) };
+    const e = env({ IP_LIMITER: limiter });
+    const token = oauthToken("user-a");
+    for (let i = 0; i < 3; i++) expect((await rpc(token, INIT, {}, e)).status).toBe(200);
+    expect(keys).toHaveLength(1);
+    expect(userChecks()).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) expect((await rpc(DEPLOY_TOKEN, INIT, { "x-micropage-project": UUID }, e)).status).toBe(200);
     expect(keys).toHaveLength(2);
+    expect(calls.filter((x) => x.url.endsWith("/exchange-deploy-token"))).toHaveLength(1);
+
+    // Once the verification has expired, the next check is an upstream call again and counts.
+    skewMs = 61_000;
+    expect((await rpc(token, INIT, {}, e)).status).toBe(200);
+    expect(keys).toHaveLength(3);
+    expect(userChecks()).toHaveLength(2);
   });
 
   it("does not limit when the bindings are absent or failing", async () => {
@@ -515,5 +586,220 @@ describe("dohLookup", () => {
     expect(seen.every((u) => u.startsWith("https://cloudflare-dns.com/dns-query?name=img.example"))).toBe(true);
     expect(await lookup("nope.example")).toEqual([]);
     await expect(dohLookup(async () => json({}, 500))("x.example")).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("configuration", () => {
+  it("refuses to serve /mcp or the metadata while RESOURCE_URL is the placeholder or not https", async () => {
+    const cases: Array<[string, string]> = [
+      ["https://micropage-mcp-remote.REPLACE-WITH-ACCOUNT-SUBDOMAIN.workers.dev/mcp", "RESOURCE_URL_PLACEHOLDER"],
+      ["http://mcp.example.test/mcp", "RESOURCE_URL_NOT_HTTPS"],
+      ["not a url", "RESOURCE_URL_INVALID"],
+    ];
+    for (const [resource, code] of cases) {
+      logs = [];
+      const e = env({ RESOURCE_URL: resource });
+      const mcp = await rpc(oauthToken("user-a"), INIT, {}, e);
+      expect(mcp.status, resource).toBe(500);
+      await mcp.text();
+      for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
+        const prm = await call(path, {}, e);
+        expect(prm.status, `${resource} ${path}`).toBe(500);
+        expect(await prm.text()).not.toContain("REPLACE");
+      }
+      const configErrors = logs.map((l) => JSON.parse(l) as Record<string, unknown>).filter((x) => x.event === "config_error");
+      expect(configErrors, resource).toHaveLength(3);
+      expect(configErrors.every((x) => x.error_code === code), resource).toBe(true);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("answers a non-GET on the metadata with 405 and an Allow header that includes HEAD", async () => {
+    const res = await call("/.well-known/oauth-protected-resource", { method: "POST" });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+    expect((await call("/.well-known/oauth-protected-resource", { method: "HEAD" })).status).toBe(200);
+  });
+
+  it("logs a non-standard HTTP method as other", async () => {
+    await (await call("/healthz", { method: "PROPFIND" })).text();
+    await (await call("/healthz", { method: "HEAD" })).text();
+    const methods = logs.map((l) => (JSON.parse(l) as { http_method?: string }).http_method);
+    expect(methods).toEqual(["other", "HEAD"]);
+    expect(logs.join("\n")).not.toContain("PROPFIND");
+  });
+
+  it("denies {url} uploads from the host the request arrived at, not only the RESOURCE_URL host", async () => {
+    const workersDev = "micropage-mcp-remote.acct.workers.dev";
+    const denied = deniedHostsFor(env({ RESOURCE_URL: "https://mcp.micropage.sh/mcp" }), workersDev);
+    expect(denied.exact).toEqual(expect.arrayContaining([workersDev, "mcp.micropage.sh", "sb.example.test"]));
+
+    const c = await connect(oauthToken("user-a"), {}, env(), `https://${workersDev}/mcp`);
+    const res = await c.callTool({ name: "upload_asset", arguments: { project: "acme", filename: "x.png", source: { url: `https://${workersDev}/x.png` } } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/not fetched by this server/);
+    expect(external).toEqual([]);
+  });
+});
+
+describe("verification edges", () => {
+  it("refuses a token whose /auth/v1/user id differs from its sub, and does not cache it", async () => {
+    backend.users["user-a"] = "mismatch";
+    const token = oauthToken("user-a");
+    const first = await rpc(token, INIT);
+    expect(first.status).toBe(401);
+    expect(await first.text()).toMatch(/does not match its user/);
+    expect((await rpc(token, INIT)).status).toBe(401);
+    expect(userChecks()).toHaveLength(2);
+  });
+
+  it("makes one upstream check for concurrent requests with the same token", async () => {
+    let release!: () => void;
+    backend.userGate = new Promise<void>((resolve) => (release = resolve));
+    const token = oauthToken("user-a");
+    const pending = [rpc(token, INIT), rpc(token, INIT), rpc(token, INIT)];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const responses = await Promise.all(pending);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(userChecks()).toHaveLength(1);
+  });
+});
+
+describe("permissions", () => {
+  it("treats a failed permissions read as everything off, logs it, and does not cache it", async () => {
+    backend.permissionsFail = true;
+    backend.posts = [post({ email_enabled: true, form_id: FORM_ID })];
+    const c = await connect(oauthToken("user-a"));
+    const names = (await c.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain("delete_project");
+    expect(names).not.toContain("list_submissions");
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token: "x.y" } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Let it send newsletter emails/);
+    expect(calls.filter((x) => x.url.includes("/rest/v1/mcp_connection_permissions")).length).toBeGreaterThan(1);
+    expect(logs.some((l) => (JSON.parse(l) as { event?: string }).event === "permissions_error")).toBe(true);
+  });
+
+  it("registers list_submissions only when the row allows submissions", async () => {
+    backend.permissions = { allow_send: true, allow_delete: true, allow_submissions: false };
+    let c = await connect(oauthToken("user-a"));
+    expect((await c.listTools()).tools.map((t) => t.name)).not.toContain("list_submissions");
+    await disconnect();
+
+    backend.permissions = { allow_send: false, allow_delete: false, allow_submissions: true };
+    c = await connect(oauthToken("user-b"));
+    expect((await c.listTools()).tools.map((t) => t.name)).toContain("list_submissions");
+  });
+});
+
+describe("uploads on the hosted server", () => {
+  const PNG_HEAD = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const pngOf = (size: number) => {
+    const bytes = new Uint8Array(size);
+    bytes.set(PNG_HEAD);
+    return bytes;
+  };
+
+  it("advertises a 4 MB cap and prefers {url}", async () => {
+    expect(REMOTE_MAX_ASSET_BYTES).toBe(4 * 1024 * 1024);
+    const c = await connect(oauthToken("user-a"));
+    const upload = (await c.listTools()).tools.find((t) => t.name === "upload_asset")!;
+    expect(upload.description).toMatch(/max 4 MB/);
+    expect(upload.description).not.toMatch(/10 MB/);
+    expect(upload.description).toContain(REMOTE_OAUTH_HINTS.uploadSourceNote);
+    const schema = JSON.stringify(upload.inputSchema);
+    expect(schema).toContain("Max 4 MB");
+    expect(schema).toContain('"maxLength":6000000');
+  });
+
+  it("refuses base64 over 4 MB before anything is uploaded", async () => {
+    const c = await connect(oauthToken("user-a"));
+    const base64 = Buffer.from(pngOf(REMOTE_MAX_ASSET_BYTES + 1)).toString("base64");
+    const res = await c.callTool({ name: "upload_asset", arguments: { project: "acme", filename: "big.png", source: { base64 } } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/the limit is 4\.00 MB/);
+    expect(calls.some((x) => x.url.includes("/functions/v1/"))).toBe(false);
+  });
+
+  it("refuses a {url} image over 4 MB while reading it", async () => {
+    externalRoutes["https://img.example/big.png"] = () => new Response(pngOf(REMOTE_MAX_ASSET_BYTES + 1), { headers: { "content-type": "image/png" } });
+    const c = await connect(oauthToken("user-a"));
+    const res = await c.callTool({ name: "upload_asset", arguments: { project: "acme", filename: "big.png", source: { url: "https://img.example/big.png" } } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/4\.00 MB/);
+    expect(calls.some((x) => x.url.includes("/functions/v1/"))).toBe(false);
+  });
+
+  it("refuses a {url} that redirects to a denied, private or privately resolving hop, without fetching it", async () => {
+    const redirect = (location: string) => () => new Response(null, { status: 302, headers: { location } });
+    externalRoutes["https://img.example/denied.png"] = redirect("https://fallback.micropage.sh/x.png");
+    externalRoutes["https://img.example/self.png"] = redirect("https://mcp.example.test/x.png");
+    externalRoutes["https://img.example/literal.png"] = redirect("https://10.0.0.1/x.png");
+    externalRoutes["https://img.example/resolves.png"] = redirect("https://intranet.example/x.png");
+    hostAddresses["intranet.example"] = "192.168.1.10";
+
+    const c = await connect(oauthToken("user-a"));
+    const cases: Array<[string, RegExp]> = [
+      ["denied", /not fetched by this server/],
+      ["self", /not fetched by this server/],
+      ["literal", /private, local or reserved address \(10\.0\.0\.1\)/],
+      ["resolves", /private, local or reserved address \(192\.168\.1\.10\)/],
+    ];
+    for (const [name, message] of cases) {
+      const res = await c.callTool({
+        name: "upload_asset",
+        arguments: { project: "acme", filename: "x.png", source: { url: `https://img.example/${name}.png` } },
+      });
+      expect(res.isError, name).toBe(true);
+      expect(text(res), name).toMatch(message);
+    }
+    expect(external).toEqual(cases.map(([name]) => `https://img.example/${name}.png`));
+  });
+});
+
+describe("hosted wording for login and deploy-token failures", () => {
+  const noStdio = (s: string) => {
+    expect(s).not.toMatch(/micropage login/);
+    expect(s).not.toMatch(/MICROPAGE_/);
+  };
+
+  it("deploy token revoked mid-session: the re-exchange failure points at the connector settings", async () => {
+    const c = await connect(DEPLOY_TOKEN, { "x-micropage-project": UUID });
+    backend.restUnauthorized = true;
+    backend.deployRevoked = true;
+    const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain(REMOTE_DEPLOY_TOKEN_HINTS.deployTokenCheck);
+    noStdio(text(res));
+  });
+
+  it("deploy token whose project is gone: the re-exchange failure points at the X-Micropage-Project header", async () => {
+    const c = await connect(DEPLOY_TOKEN, { "x-micropage-project": UUID });
+    backend.restUnauthorized = true;
+    backend.deployProjectGone = true;
+    const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain(REMOTE_DEPLOY_TOKEN_HINTS.deployProjectCheck);
+    noStdio(text(res));
+  });
+
+  it("deploy token: a 401 after a successful re-exchange names the connector settings", async () => {
+    const c = await connect(DEPLOY_TOKEN, { "x-micropage-project": UUID });
+    backend.restUnauthorized = true;
+    const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain(REMOTE_DEPLOY_TOKEN_HINTS.sessionInvalid);
+    noStdio(text(res));
+    expect(exchanges).toBe(2);
+  });
+
+  it("OAuth: a token the API rejects asks for a reconnect", async () => {
+    const c = await connect(oauthToken("user-a"));
+    backend.restUnauthorized = true;
+    const res = await c.callTool({ name: "list_projects", arguments: {} });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/reconnect/);
+    noStdio(text(res));
   });
 });

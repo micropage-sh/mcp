@@ -100,7 +100,7 @@ function looksLike(ext: string, bytes: Uint8Array): boolean {
     case ".ico":
       return startsWith(bytes, [0x00, 0x00, 0x01, 0x00]);
     case ".svg":
-      return hasSvgRoot(Buffer.from(bytes).toString("utf8"));
+      return hasSvgRoot(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8"));
     default:
       return false;
   }
@@ -217,7 +217,9 @@ export async function loadAssetSource(source: AssetSource, options: LoadSourceOp
 
 function loadBase64(raw: string, maxBytes: number): Buffer {
   // Accept a data: URL as well as bare base64, and ignore line wrapping.
-  const body = raw.replace(/^data:[^,]*;base64,/i, "").replace(/\s+/g, "");
+  // The argument can be megabytes, so it is only copied when it has whitespace to strip.
+  const unprefixed = raw.replace(/^data:[^,]*;base64,/i, "");
+  const body = /\s/.test(unprefixed) ? unprefixed.replace(/\s+/g, "") : unprefixed;
   if (!body || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(body)) {
     throw new MicropageError("INVALID_SOURCE", "source.base64 is not valid base64. Pass the file bytes base64-encoded (a data: URL is fine).");
   }
@@ -463,7 +465,7 @@ export async function deleteFile(http: Http, fileId: string): Promise<void> {
 /** Multipart body exactly as the CLI's uploadAssetWithToken builds it. */
 export function buildUploadForm(projectId: number, filename: string, bytes: Uint8Array, contentHash: string): FormData {
   const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(bytes)], { type: mimeTypeFor(filename) }), filename);
+  form.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeTypeFor(filename) }), filename);
   form.append("project_id", String(projectId));
   form.append("content_hash", contentHash);
   return form;

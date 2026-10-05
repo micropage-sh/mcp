@@ -190,6 +190,21 @@ describe("loadAssetSource", () => {
     await expectCode(loadAssetSource({ base64: Buffer.alloc(200).toString("base64") }, { maxBytes: 100 }), "ASSET_TOO_LARGE");
   });
 
+  it("ignores line wrapping in base64, with or without a data: prefix", async () => {
+    const wrapped = PNG.toString("base64").replace(/(.{4})/g, "$1\n ");
+    expect(await loadAssetSource({ base64: wrapped })).toEqual(PNG);
+    expect(await loadAssetSource({ base64: `data:image/png;base64,${wrapped}` })).toEqual(PNG);
+    await expectCode(loadAssetSource({ base64: " \n\t" }), "INVALID_SOURCE");
+  });
+
+  it("checks an SVG held in a view of a larger buffer by the view's bytes only", () => {
+    const backing = Buffer.from("<html><svg></svg></html><svg/>junk");
+    const view = new Uint8Array(backing.buffer, backing.byteOffset + 24, 6);
+    expect(() => assertContentMatchesExtension("x.svg", view)).not.toThrow();
+    const html = new Uint8Array(backing.buffer, backing.byteOffset, 24);
+    expect(() => assertContentMatchesExtension("x.svg", html)).toThrow(/not a valid SVG/);
+  });
+
   it("has a 10 MB default cap", async () => {
     expect(MAX_ASSET_BYTES).toBe(10 * 1024 * 1024);
     const b64 = Buffer.alloc(MAX_ASSET_BYTES + 3).toString("base64");

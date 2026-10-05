@@ -20,7 +20,7 @@ import type { ToolContext } from "../context.js";
 import { gateTool, structuredResult } from "./shared.js";
 
 const EXTENSIONS = Object.keys(ASSET_MIME_TYPES).join(", ");
-const MAX_MB = MAX_ASSET_BYTES / (1024 * 1024);
+const maxMb = (maxBytes: number): number => maxBytes / (1024 * 1024);
 
 const AssetFilename = z
   .string()
@@ -55,28 +55,33 @@ const UrlSource = z
   })
   .strict();
 
-const Base64Source = z
-  .object({
-    base64: z
-      .string()
-      .min(1)
-      // ~10 MB of bytes is ~13.4 M base64 chars; the decoded size is checked exactly later.
-      .max(14_000_000)
-      .describe("The image bytes, base64-encoded. A data: URL (data:image/png;base64,...) also works."),
-  })
-  .strict();
+const base64Source = (maxBytes: number) =>
+  z
+    .object({
+      base64: z
+        .string()
+        .min(1)
+        // 4/3 chars per byte, rounded up to a whole million (14 M for 10 MB); the decoded size is checked exactly later.
+        .max(Math.ceil((maxBytes * 4) / 3 / 1_000_000) * 1_000_000)
+        .describe("The image bytes, base64-encoded. A data: URL (data:image/png;base64,...) also works."),
+    })
+    .strict();
 
-const SOURCE_RULES = `Max ${MAX_MB} MB. The content must really be the image type the filename's extension says.`;
+const sourceRules = (maxBytes: number): string =>
+  `Max ${maxMb(maxBytes)} MB. The content must really be the image type the filename's extension says.`;
 
 /** With {path}: a server that can read the user's files. */
-export const AssetSourceInput = z
-  .union([PathSource, UrlSource, Base64Source])
-  .describe(`Where the bytes come from: exactly one of {path}, {url} or {base64}. ${SOURCE_RULES}`);
+const assetSourceInput = (maxBytes: number) =>
+  z
+    .union([PathSource, UrlSource, base64Source(maxBytes)])
+    .describe(`Where the bytes come from: exactly one of {path}, {url} or {base64}. ${sourceRules(maxBytes)}`);
 
 /** Without {path}: a hosted server, so the schema never offers what it cannot do. */
-export const RemoteAssetSourceInput = z
-  .union([UrlSource, Base64Source])
-  .describe(`Where the bytes come from: exactly one of {url} or {base64}. ${SOURCE_RULES}`);
+const remoteAssetSourceInput = (maxBytes: number) =>
+  z.union([UrlSource, base64Source(maxBytes)]).describe(`Where the bytes come from: exactly one of {url} or {base64}. ${sourceRules(maxBytes)}`);
+
+export const AssetSourceInput = assetSourceInput(MAX_ASSET_BYTES);
+export const RemoteAssetSourceInput = remoteAssetSourceInput(MAX_ASSET_BYTES);
 
 const uploadAssetInput = <S extends typeof AssetSourceInput | typeof RemoteAssetSourceInput>(source: S) =>
   z.object({ project: ProjectRef, filename: AssetFilename, source }).strict();
@@ -104,9 +109,10 @@ export async function runUploadAsset(ctx: ToolContext, args: z.infer<typeof Uplo
   // Validated before any network call or file read.
   const filename = validateAssetFilename(args.filename);
   const project = await resolveProject(ctx, args.project);
-  const { pathLoader, lookupHost, deniedHosts, fetchExternal } = ctx.uploads;
+  const { pathLoader, lookupHost, deniedHosts, fetchExternal, maxBytes } = ctx.uploads;
   const bytes = await loadAssetSource(args.source as AssetSource, {
     lookup: lookupHost,
+    maxBytes: maxBytes ?? MAX_ASSET_BYTES,
     ...(pathLoader ? { pathLoader } : {}),
     ...(deniedHosts ? { deniedHosts } : {}),
     ...(fetchExternal ? { fetch: fetchExternal } : {}),
@@ -211,9 +217,11 @@ export async function runGetFileUrl(ctx: ToolContext, args: z.infer<typeof GetFi
 export function registerFileTools(server: McpServer, ctx: ToolContext): void {
   const local = ctx.uploads.pathLoader !== undefined;
   const sources = local ? "from a local file path, a public https URL, or base64 bytes" : "from a public https URL or base64 bytes";
+  const maxBytes = ctx.uploads.maxBytes ?? MAX_ASSET_BYTES;
+  const sourceNote = ctx.hints.uploadSourceNote ? ` ${ctx.hints.uploadSourceNote}` : "";
   const uploadConfig = {
     title: "Upload an image asset",
-    description: `Upload one image (${EXTENSIONS}; max ${MAX_MB} MB) to a micropage project's file storage, ${sources}. Returns the stored filename, the markup to reference it (\`img: <- hero.webp\`) and its URL.
+    description: `Upload one image (${EXTENSIONS}; max ${maxMb(maxBytes)} MB) to a micropage project's file storage, ${sources}.${sourceNote} Returns the stored filename, the markup to reference it (\`img: <- hero.webp\`) and its URL.
 
 Use it BEFORE save_page or upsert_post reference the image: page markup like \`img: <- hero.webp\` and a post's \`hero: hero.webp\` only resolve to files already stored in the project, and a missing name renders no image. Upload each asset once; calling again with identical content is a no-op (deduped: true, same SHA-256 as the CLI uses).
 
@@ -230,9 +238,9 @@ Do not use it for non-image files (unsupported), for images already hosted elsew
   };
   // Two calls rather than a conditional schema so each keeps its inferred argument type.
   if (local) {
-    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: UploadAssetInput }, uploadHandler);
+    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: uploadAssetInput(assetSourceInput(maxBytes)) }, uploadHandler);
   } else {
-    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: RemoteUploadAssetInput }, uploadHandler);
+    server.registerTool("upload_asset", { ...uploadConfig, inputSchema: uploadAssetInput(remoteAssetSourceInput(maxBytes)) }, uploadHandler);
   }
 
   server.registerTool(

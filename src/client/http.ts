@@ -1,3 +1,4 @@
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { VERSION } from "../version.js";
 import type { AuthProvider } from "./auth-provider.js";
 import type { MicropageConfig } from "./config.js";
@@ -11,6 +12,8 @@ export interface HttpOptions {
   fetch?: FetchLike;
   timeoutMs?: number;
   userAgent?: string;
+  /** Wording of the 401 error. Defaults to the stdio wording. */
+  hints?: Pick<ModeHints, "sessionInvalid">;
 }
 
 export interface RequestOptions {
@@ -56,6 +59,7 @@ export class Http {
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly userAgent: string;
+  private readonly sessionInvalid: string;
 
   constructor(options: HttpOptions) {
     this.config = options.config;
@@ -63,12 +67,13 @@ export class Http {
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.userAgent = options.userAgent ?? `micropage-mcp/${VERSION}`;
+    this.sessionInvalid = (options.hints ?? STDIO_HINTS).sessionInvalid;
   }
 
   async request<T = unknown>(method: string, url: string, options: RequestOptions = {}): Promise<T> {
     const res = await this.exchange(method, url, options);
     const data = await readBody(res);
-    if (!res.ok) throw httpError(method, url, res, data);
+    if (!res.ok) throw httpError(method, url, res, data, this.sessionInvalid);
     return data as T;
   }
 
@@ -101,7 +106,7 @@ export class Http {
     const url = this.restUrl(table, params);
     const res = await this.exchange("HEAD", url, { headers: { Prefer: "count=exact" } });
     const data = await readBody(res);
-    if (!res.ok) throw httpError("HEAD", url, res, data);
+    if (!res.ok) throw httpError("HEAD", url, res, data, this.sessionInvalid);
     const total = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "")?.[1];
     if (total === undefined) {
       throw new MicropageError("HTTP", `HEAD ${new URL(url).pathname} returned no row count (Content-Range). Retry shortly.`, {
@@ -226,15 +231,11 @@ function describe(method: string, url: string): string {
   return `${method} ${path}`;
 }
 
-function httpError(method: string, url: string, res: Response, data: unknown): MicropageError {
+function httpError(method: string, url: string, res: Response, data: unknown, sessionInvalid: string): MicropageError {
   const planRequired = planRequiredError(data, { status: res.status });
   if (planRequired) return planRequired;
   if (res.status === 401) {
-    return new MicropageError(
-      "SESSION_EXPIRED",
-      "The micropage session is no longer valid. Ask the user to run `micropage login` in a terminal, then retry.",
-      { status: 401, data },
-    );
+    return new MicropageError("SESSION_EXPIRED", sessionInvalid, { status: 401, data });
   }
   const detail =
     (data && typeof data === "object" && (pick(data, "message") ?? pick(data, "error"))) ||

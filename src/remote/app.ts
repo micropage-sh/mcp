@@ -18,13 +18,20 @@ import { PlanTierCache } from "../client/tier.js";
 import type { ServerDeps } from "../context.js";
 import { createServer, SERVER_NAME } from "../server.js";
 import { VERSION } from "../version.js";
-import { MAX_REQUEST_BODY_BYTES, MCP_PATH, allowedOrigins, remoteConfig, type Env } from "./config.js";
+import { MAX_REQUEST_BODY_BYTES, MCP_PATH, allowedOrigins, remoteConfig, resourceUrlProblem, type Env } from "./config.js";
 import { depsFor, type RemoteShared } from "./deps.js";
 import { dohLookup } from "./doh.js";
 import { createLogger, errorFacts, shortHash, type LogSink, type RequestLogEntry } from "./log.js";
 import { PermissionStore } from "./permissions.js";
 import { overLimit, tooManyRequests } from "./rate-limit.js";
-import { DeployTokenVerifier, OAuthAccessTokenVerifier, UpstreamUnavailable, requestVerifier, type VerifiedAuth } from "./verifier.js";
+import {
+  DeployTokenVerifier,
+  OAuthAccessTokenVerifier,
+  UpstreamUnavailable,
+  isCachedCredential,
+  requestVerifier,
+  type VerifiedAuth,
+} from "./verifier.js";
 
 export interface WorkerOptions {
   /** Every outbound call: Supabase, the build compiler, DNS-over-HTTPS and `{url}` uploads (tests). */
@@ -99,15 +106,26 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
     const cors = origin ? corsHeaders(origin, request) : null;
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors ?? {} });
 
-    const resourceMetadataUrl = prmUrl(env);
+    const resourceProblem = resourceUrlProblem(env);
+    const resourceMetadataUrl = resourceProblem ? null : prmUrl(env);
     if (!resourceMetadataUrl || !env.MCP_CONFIRM_KEY || env.MCP_CONFIRM_KEY.length < CONFIRM_KEY_MIN_LENGTH) {
-      logger.log({ event: "config_error", error_code: !resourceMetadataUrl ? "RESOURCE_URL" : "MCP_CONFIRM_KEY" });
-      entry.error_code = "misconfigured";
-      return withCors(Response.json({ error: "server_error", error_description: "The server is misconfigured." }, { status: 500 }), cors);
+      return withCors(misconfigured(entry, !resourceMetadataUrl ? (resourceProblem ?? "RESOURCE_URL") : "MCP_CONFIRM_KEY"), cors);
     }
 
     let authInfo: AuthInfo;
     const { oauth, deploy } = verifiersFor(env);
+    // Checked before verification, which asks Supabase about any credential
+    // this isolate has not seen. Bare requests (no Authorization) are how every
+    // OAuth client starts and hosted clients share egress IPs, so they are not
+    // counted; neither is a credential already verified here.
+    if (
+      request.headers.get("authorization")?.trim() &&
+      !(await isCachedCredential(request, oauth, deploy)) &&
+      (await overLimit(env.IP_LIMITER, `ip:${request.headers.get("cf-connecting-ip") ?? "unknown"}`))
+    ) {
+      entry.error_code = "rate_limited";
+      return withCors(tooManyRequests(), cors);
+    }
     try {
       authInfo = await verifyBearerToken(request.headers.get("authorization"), {
         verifier: requestVerifier(request, oauth, deploy),
@@ -122,13 +140,6 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
         );
       }
       entry.error_code = err instanceof OAuthError ? String(err.code) : "auth_failed";
-      // Only presented-but-bad credentials count: a bare discovery request (no Authorization) is how
-      // every OAuth client starts, and hosted clients share egress IPs across many users.
-      const presentedCredential = Boolean(request.headers.get("authorization")?.trim());
-      if (presentedCredential && (await overLimit(env.IP_LIMITER, `ip:${request.headers.get("cf-connecting-ip") ?? "unknown"}`))) {
-        entry.error_code = "rate_limited";
-        return withCors(tooManyRequests(), cors);
-      }
       return withCors(bearerAuthChallengeResponse(err, { resourceMetadataUrl }), cors);
     }
 
@@ -179,6 +190,7 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
     }
 
     const deps = await depsFor(verified, env, shared, {
+      requestHost: new URL(request.url).hostname,
       onPermissionsError: (err) => logger.log({ event: "permissions_error", sub_hash: entry.sub_hash, ...errorFacts(err) }),
       onToolError: (_tool, err) => {
         entry.error_code = errorFacts(err).error_code ?? "tool_error";
@@ -191,17 +203,23 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
     return withCors(response, cors);
   }
 
+  function misconfigured(entry: RequestLogEntry, cause: string): Response {
+    logger.log({ event: "config_error", error_code: cause });
+    entry.error_code = "misconfigured";
+    return Response.json({ error: "server_error", error_description: "The server is misconfigured." }, { status: 500 });
+  }
+
   return {
     async fetch(request, env) {
       const started = now();
       const url = new URL(request.url);
-      const entry: RequestLogEntry = { event: "request", route: routeName(url.pathname), http_method: request.method };
+      const entry: RequestLogEntry = { event: "request", route: routeName(url.pathname), http_method: methodName(request.method) };
       let response: Response;
       try {
         if (url.pathname === MCP_PATH) {
           response = await serveMcp(request, env, entry);
         } else if (url.pathname === PRM_PATH || url.pathname === `${PRM_PATH}${MCP_PATH}`) {
-          response = protectedResourceMetadata(request, env);
+          response = protectedResourceMetadata(request, env, (cause) => misconfigured(entry, cause));
         } else if (url.pathname === "/healthz" && (request.method === "GET" || request.method === "HEAD")) {
           response = Response.json({ ok: true, name: SERVER_NAME, version: VERSION });
         } else {
@@ -264,6 +282,13 @@ function afterBody(response: Response, done: () => void): Response {
   return new Response(body, response);
 }
 
+const STANDARD_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "CONNECT", "TRACE"]);
+
+/** The method for the log; a non-standard one is caller-chosen text, so it is reduced to "other". */
+function methodName(method: string): string {
+  return STANDARD_METHODS.has(method) ? method : "other";
+}
+
 /** A fixed label, never the raw path, which is caller-controlled. */
 function routeName(path: string): string {
   if (path === MCP_PATH) return "mcp";
@@ -297,12 +322,14 @@ export function buildMetadata(env: Env): OAuthProtectedResourceMetadata {
 }
 
 /** RFC 9728 metadata. Public and cacheable, so any origin may read it. */
-function protectedResourceMetadata(request: Request, env: Env): Response {
+function protectedResourceMetadata(request: Request, env: Env, misconfigured: (cause: string) => Response): Response {
   const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Allow-Headers": "*" };
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return Response.json({ error: "method_not_allowed" }, { status: 405, headers: { ...cors, Allow: "GET, OPTIONS" } });
+    return Response.json({ error: "method_not_allowed" }, { status: 405, headers: { ...cors, Allow: "GET, HEAD, OPTIONS" } });
   }
+  const problem = resourceUrlProblem(env);
+  if (problem) return misconfigured(problem);
   return Response.json(buildMetadata(env), { headers: { ...cors, "Cache-Control": "public, max-age=3600" } });
 }
 
