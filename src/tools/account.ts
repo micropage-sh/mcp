@@ -5,7 +5,7 @@ import { RO } from "../annotations.js";
 import { isMicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
 import { decodeJwtClaims } from "../client/jwt.js";
-import { UPGRADE_MESSAGE, isPaidTier, type PlanTier } from "../client/tier.js";
+import { isPaidTier, type PlanTier } from "../client/tier.js";
 import type { ToolContext } from "../context.js";
 import { assertDeployTokenAllows } from "../guards.js";
 import { structuredResult } from "./shared.js";
@@ -127,7 +127,7 @@ export async function runWhoami(ctx: ToolContext): Promise<WhoamiResult> {
     plan_tier: tier,
     paid_plan: ctx.auth.mode === "deploy_token" ? true : paid,
     subscription,
-    note: paid === false && ctx.auth.mode !== "deploy_token" ? UPGRADE_MESSAGE : null,
+    note: paid === false && ctx.auth.mode !== "deploy_token" ? ctx.hints.planRequiredNote : null,
   };
 }
 

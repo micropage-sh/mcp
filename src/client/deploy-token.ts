@@ -51,7 +51,7 @@ export interface DeployTokenAuthOptions extends DeployTokenEnv {
   ttlSeconds?: number;
   timeoutMs?: number;
   /** What a refused exchange tells the user to check. Defaults to the stdio wording (env vars). */
-  hints?: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck">;
+  hints?: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck" | "upgradeLinks">;
 }
 
 interface ExchangeResponse {
@@ -80,7 +80,7 @@ export class DeployTokenAuthProvider implements AuthProvider {
   private readonly now: () => number;
   private readonly ttlSeconds: number;
   private readonly timeoutMs: number;
-  private readonly hints: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck">;
+  private readonly hints: Pick<ModeHints, "deployTokenCheck" | "deployProjectCheck" | "upgradeLinks">;
   private cached: { accessToken: string; expiresAtMs: number } | null = null;
   private inflight: Promise<string> | null = null;
 
@@ -148,7 +148,7 @@ export class DeployTokenAuthProvider implements AuthProvider {
     // Checked before the 401/403 branch: a token whose owner dropped below
     // Pro+ is valid but refused, and "token invalid" would send the user
     // off rotating a token that is fine.
-    const planRequired = planRequiredError(data, { status: res.status });
+    const planRequired = planRequiredError(data, { status: res.status }, this.hints);
     if (planRequired) throw planRequired;
     if (res.status === 401 || res.status === 403) {
       throw new MicropageError(

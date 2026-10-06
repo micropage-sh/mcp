@@ -267,6 +267,51 @@ describe("publishPost plan refusals", () => {
   });
 });
 
+describe("plan refusals on a hosted connection", () => {
+  const BODY = {
+    error: "Newsletter sends require a Pro plan. Upgrade at /pricing.",
+    code: "plan_required",
+    required_tier: "pro",
+    upgrade_url: "https://micropage.sh/pricing",
+  };
+
+  it.each([
+    ["OAuth", REMOTE_OAUTH_HINTS],
+    ["deploy token", REMOTE_DEPLOY_TOKEN_HINTS],
+  ])("%s: planRequiredError keeps the reason and drops every upgrade link", (_mode, hints) => {
+    expect(planRequiredError(BODY, {}, hints)?.message).toBe("Newsletter sends require a Pro plan.");
+    expect(planRequiredError({ code: "plan_required", required_tier: "pro_plus" }, {}, hints)?.message).toBe("This needs the Pro+ plan.");
+    expect(planRequiredError({ code: "plan_required", error: "Nope" }, {}, hints)?.message).toBe("Nope.");
+  });
+
+  it.each([
+    ["OAuth", REMOTE_OAUTH_HINTS],
+    ["deploy token", REMOTE_DEPLOY_TOKEN_HINTS],
+  ])("%s: Http and publishPost carry the hosted wording", async (_mode, hints) => {
+    const http = new Http({ config: TEST_CONFIG, auth: new FakeAuth(), fetch: createFakeFetch({ status: 403, body: BODY }).fetch, hints });
+    const err = (await http.request("GET", `${TEST_CONFIG.supabaseUrl}/rest/v1/x`).catch((e: unknown) => e)) as MicropageError;
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.message).toBe("Newsletter sends require a Pro plan.");
+
+    const planHttp = new Http({ config: TEST_CONFIG, auth: new FakeAuth(), fetch: createFakeFetch({ status: 402, body: BODY }).fetch, hints });
+    const plan = (await publishPost(planHttp, 7, "hello", hints).catch((e: unknown) => e)) as MicropageError;
+    expect(plan.code).toBe("PLAN_REQUIRED");
+    expect(plan.message).toMatch(/^micropage refused to send this post: Newsletter sends require a Pro plan\. Tell the user\./);
+    expect(plan.message).not.toMatch(/upgrade|pricing/i);
+
+    const limitHttp = new Http({
+      config: TEST_CONFIG,
+      auth: new FakeAuth(),
+      fetch: createFakeFetch({ status: 402, body: { error: "Monthly newsletter send limit of 1000 reached for your plan." } }).fetch,
+      hints,
+    });
+    const limit = (await publishPost(limitHttp, 7, "hello", hints).catch((e: unknown) => e)) as MicropageError;
+    expect(limit.code).toBe("PLAN_LIMIT");
+    expect(limit.message).toContain("count against a monthly recipient limit; tell the user. No email went out");
+    expect(limit.message).not.toMatch(/upgrade|pricing/i);
+  });
+});
+
 describe("planRequiredError message", () => {
   it("drops a relative upgrade hint written for the editor", async () => {
     const { planRequiredError } = await import("../src/client/errors.js");

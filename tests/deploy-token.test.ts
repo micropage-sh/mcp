@@ -185,6 +185,13 @@ describe("DeployTokenAuthProvider wording for a hosted connection", () => {
     for (const err of [rejected, missing]) expect(err.message).not.toMatch(/MICROPAGE_|micropage login/);
   });
 
+  it("reports a plan refusal with the server's reason and no upgrade link", async () => {
+    const body = { error: "Deploy tokens require the Pro+ plan. Upgrade at /pricing.", code: "plan_required", required_tier: "pro_plus", upgrade_url: "https://micropage.sh/pricing" };
+    const err = (await make(403, body).getAccessToken().catch((e: unknown) => e)) as MicropageError;
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.message).toBe("Deploy tokens require the Pro+ plan.");
+  });
+
   it("reports whether the cached JWT is fresh enough to skip an exchange", async () => {
     const nowSec = 1_800_000_000;
     const clock = { now: nowSec * 1000 };

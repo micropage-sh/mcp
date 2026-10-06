@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { MicropageError } from "../src/client/errors.js";
 import { PLAN_CACHE_MAX_USERS, PLAN_CACHE_TTL_MS, PlanGate, PlanTierCache, PRICING_URL } from "../src/client/tier.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS, REMOTE_OAUTH_HINTS } from "../src/hints.js";
 import { FakeAuth, createFakeFetch, makeHttp } from "./helpers/fake-fetch.js";
 import { tokenFor } from "./helpers/session.js";
 
@@ -43,6 +44,18 @@ describe("PlanGate", () => {
     expect(err.code).toBe("PLAN_REQUIRED");
     expect(err.message).toContain(PRICING_URL);
     expect(err.message).toMatch(/paid plans only/);
+  });
+
+  it.each([
+    ["OAuth", REMOTE_OAUTH_HINTS],
+    ["deploy token", REMOTE_DEPLOY_TOKEN_HINTS],
+  ])("refuses the free plan without an upgrade pitch on a hosted connection (%s wording)", async (_mode, hints) => {
+    const auth = new FakeAuth([TOKEN]);
+    const g = new PlanGate({ http: makeHttp(createFakeFetch({ body: [{ plan_tier: "free" }] }), auth), auth, hints });
+    const err = (await g.requirePaidPlan().catch((e: unknown) => e)) as MicropageError;
+    expect(err.code).toBe("PLAN_REQUIRED");
+    expect(err.message).toBe("This micropage account's plan doesn't include the MCP server (it needs the Pro plan). Nothing was changed.");
+    expect(err.message).toBe(hints.planRequired);
   });
 
   it("treats a missing customer row as free", async () => {

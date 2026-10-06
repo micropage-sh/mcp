@@ -1,3 +1,7 @@
+import { PRICING_URL, STDIO_HINTS, type ModeHints } from "../hints.js";
+
+export { PRICING_URL };
+
 export type MicropageErrorCode =
   | "NOT_LOGGED_IN"
   | "SESSION_EXPIRED"
@@ -41,27 +45,31 @@ export function isMicropageError(err: unknown): err is MicropageError {
   return err instanceof MicropageError;
 }
 
-export const PRICING_URL = "https://micropage.sh/pricing";
-
 /**
  * Server tier refusals carry `code: "plan_required"` in the body while reusing
  * 402/403, which also mean "not yours" or "invalid token". Returns the
  * PLAN_REQUIRED error for such a body, or null so callers fall back to the
- * status code.
+ * status code. Without upgrade links (hosted connections) the refusal is the
+ * reason alone.
  */
-export function planRequiredError(data: unknown, options: MicropageErrorOptions = {}): MicropageError | null {
+export function planRequiredError(
+  data: unknown,
+  options: MicropageErrorOptions = {},
+  hints: Pick<ModeHints, "upgradeLinks"> = STDIO_HINTS,
+): MicropageError | null {
   if (!data || typeof data !== "object") return null;
   const body = data as Record<string, unknown>;
   if (body.code !== "plan_required") return null;
   const tierLabel = body.required_tier === "pro_plus" ? "Pro+" : body.required_tier === "pro" ? "Pro" : null;
   // Server messages written for the editor may end in a relative "Upgrade at /pricing.";
-  // drop it so the absolute link below is the only one.
+  // drop it so the absolute link below, if any, is the only one.
   const serverReason =
     typeof body.error === "string" ? body.error.trim().replace(/\s*Upgrade at \S+$/i, "").trim() : "";
   const reason =
     serverReason ||
     `This needs ${tierLabel ? `the ${tierLabel} plan` : "a higher micropage plan"}.`;
-  const url = (typeof body.upgrade_url === "string" && body.upgrade_url) || PRICING_URL;
   const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+  if (!hints.upgradeLinks) return new MicropageError("PLAN_REQUIRED", sentence, { ...options, data });
+  const url = (typeof body.upgrade_url === "string" && body.upgrade_url) || PRICING_URL;
   return new MicropageError("PLAN_REQUIRED", `${sentence} Upgrade at ${url}.`, { ...options, data });
 }

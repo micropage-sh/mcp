@@ -17,6 +17,7 @@ import {
   type HostLookup,
 } from "../src/client/assets.js";
 import { MicropageError } from "../src/client/errors.js";
+import { REMOTE_DEPLOY_TOKEN_HINTS, REMOTE_OAUTH_HINTS } from "../src/hints.js";
 import { nodePathLoader } from "../src/node/path-source.js";
 import { createFakeFetch, makeHttp, type RecordedCall } from "./helpers/fake-fetch.js";
 
@@ -419,6 +420,21 @@ describe("uploadAsset dedupe (CLI uploadAssetsWithToken)", () => {
     const err = await expectCode(uploadAsset(makeHttp(fake), 7, "a.png", PNG), "QUOTA_EXCEEDED", /100\.0 MB of its 100 MB plan limit/);
     expect(err.message).toMatch(/micropage\.sh\/pricing/);
     expect(fake.calls).toHaveLength(1);
+  });
+
+  it.each([
+    ["OAuth", REMOTE_OAUTH_HINTS],
+    ["deploy token", REMOTE_DEPLOY_TOKEN_HINTS],
+  ])("%s: the quota refusal names no upgrade path on a hosted connection", async (_mode, hints) => {
+    const MB = 1024 * 1024;
+    const pre = createFakeFetch(listing([{ id: "f1", filename: "a.png", content_hash: null, size_bytes: 1 }], 100 * MB, 100));
+    const before = await expectCode(uploadAsset(makeHttp(pre), 7, "a.png", PNG, hints), "QUOTA_EXCEEDED", /100 MB plan limit/);
+    const post = createFakeFetch(listing([]), { status: 413, body: { current_usage: 99 * MB, max_bytes: 100 * MB, file_size: 2 * MB } });
+    const after = await expectCode(uploadAsset(makeHttp(post), 7, "a.png", PNG, hints), "QUOTA_EXCEEDED", /100\.0 MB plan limit/);
+    for (const err of [before, after]) {
+      expect(err.message).toContain(hints.quotaAdvice);
+      expect(err.message).not.toMatch(/upgrade|pricing/i);
+    }
   });
 
   it("surfaces upload-file's 413 with the plan limit", async () => {

@@ -2,7 +2,8 @@
  * Model-facing wording that names how the user changes a setting or fixes a
  * login. The stdio server points at env switches and `micropage login`; a
  * hosted connection has neither, so it points at the micropage account page
- * or the MCP client's reconnect instead.
+ * or the MCP client's reconnect instead. Plan refusals differ too: stdio links
+ * the pricing page, a hosted connection only states what the plan lacks.
  */
 export interface ModeHints {
   /** Completes "...whether this server is allowed to send email (<here>)." */
@@ -37,7 +38,26 @@ export interface ModeHints {
   deployProjectCheck: string;
   /** upload_asset description: which source to prefer; empty when there is no preference. */
   uploadSourceNote: string;
+  /** Error when the account's plan does not include the MCP server. */
+  planRequired: string;
+  /** whoami note on an account whose plan does not include the MCP server. */
+  planRequiredNote: string;
+  /** Whether a server plan refusal ends with "Upgrade at <pricing url>." */
+  upgradeLinks: boolean;
+  /** Follows "micropage refused to send this post: <reason>. Newsletter sends need a Pro plan and count against a monthly recipient limit; ". */
+  sendLimitAdvice: string;
+  /** Follows "Storage quota exceeded: <usage>." */
+  quotaAdvice: string;
+  /** Follows "...at its plan's project limit (Pro: 5, Pro+: 20)." */
+  projectLimitAdvice: string;
 }
+
+export const PRICING_URL = "https://micropage.sh/pricing";
+
+/** Same wording as the CLI (cli/src/plan.js), addressed to the model. */
+const STDIO_PLAN_REQUIRED =
+  "The micropage MCP server, like the micropage CLI, is available on paid plans only. " +
+  `This account is on the free plan. Tell the user they can upgrade at ${PRICING_URL}, then retry.`;
 
 export const STDIO_HINTS: ModeHints = Object.freeze({
   sendSwitchName: "MICROPAGE_MCP_ALLOW_SEND",
@@ -62,6 +82,12 @@ export const STDIO_HINTS: ModeHints = Object.freeze({
     "Ask the user to check MICROPAGE_DEPLOY_TOKEN, or to create a new token in the micropage editor under Settings > Deploy tokens.",
   deployProjectCheck: "Ask the user to check MICROPAGE_DEPLOY_PROJECT.",
   uploadSourceNote: "",
+  planRequired: STDIO_PLAN_REQUIRED,
+  planRequiredNote: STDIO_PLAN_REQUIRED,
+  upgradeLinks: true,
+  sendLimitAdvice: `tell the user (upgrade at ${PRICING_URL}).`,
+  quotaAdvice: `Tell the user to delete unused files in the micropage editor or upgrade at ${PRICING_URL}, or upload a smaller file.`,
+  projectLimitAdvice: "Tell the user to delete an unused project or upgrade.",
 });
 
 export const CONNECTED_APPS_URL = "https://app.micropage.sh/account/connected-apps";
@@ -77,6 +103,16 @@ const REMOTE_DEPLOY_PROJECT_CHECK = "Ask the user to check the X-Micropage-Proje
 // capped well below what a fetched URL may be.
 const REMOTE_UPLOAD_SOURCE_NOTE =
   "Prefer source.url whenever the image is on a public https host; use source.base64 only for an image that is not hosted anywhere.";
+// App directories forbid a hosted connector from promoting upgrades or
+// pointing at plans, so plan refusals here state the fact and stop.
+const REMOTE_PLAN_WORDING = {
+  planRequired: "This micropage account's plan doesn't include the MCP server (it needs the Pro plan). Nothing was changed.",
+  planRequiredNote: "This micropage account's plan doesn't include the MCP server (it needs the Pro plan), so the other micropage tools will refuse.",
+  upgradeLinks: false,
+  sendLimitAdvice: "tell the user.",
+  quotaAdvice: "Tell the user to delete unused files in the micropage editor, or upload a smaller file.",
+  projectLimitAdvice: "Tell the user to delete an unused project.",
+} as const;
 
 /** A hosted connection authorized through OAuth: permissions live on the user's Connected AI apps page. */
 export const REMOTE_OAUTH_HINTS: ModeHints = Object.freeze({
@@ -100,6 +136,7 @@ export const REMOTE_OAUTH_HINTS: ModeHints = Object.freeze({
   deployTokenCheck: REMOTE_DEPLOY_TOKEN_CHECK,
   deployProjectCheck: REMOTE_DEPLOY_PROJECT_CHECK,
   uploadSourceNote: REMOTE_UPLOAD_SOURCE_NOTE,
+  ...REMOTE_PLAN_WORDING,
 });
 
 /** A hosted connection on a project deploy token: no account-level settings apply. */
@@ -123,4 +160,5 @@ export const REMOTE_DEPLOY_TOKEN_HINTS: ModeHints = Object.freeze({
   deployTokenCheck: REMOTE_DEPLOY_TOKEN_CHECK,
   deployProjectCheck: REMOTE_DEPLOY_PROJECT_CHECK,
   uploadSourceNote: REMOTE_UPLOAD_SOURCE_NOTE,
+  ...REMOTE_PLAN_WORDING,
 });

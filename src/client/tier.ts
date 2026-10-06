@@ -1,4 +1,4 @@
-import type { ModeHints } from "../hints.js";
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { currentUserId, type AuthProvider } from "./auth-provider.js";
 import { MicropageError, PRICING_URL } from "./errors.js";
 import { eq, type Http } from "./http.js";
@@ -7,10 +7,8 @@ export { PRICING_URL };
 
 export type PlanTier = "free" | "pro" | "pro_plus";
 
-/** Same wording as the CLI (cli/src/plan.js), addressed to the model. */
-export const UPGRADE_MESSAGE =
-  "The micropage MCP server, like the micropage CLI, is available on paid plans only. " +
-  `This account is on the free plan. Tell the user they can upgrade at ${PRICING_URL}, then retry.`;
+/** The stdio refusal; same wording as the CLI (cli/src/plan.js), addressed to the model. */
+export const UPGRADE_MESSAGE = STDIO_HINTS.planRequired;
 
 export const PLAN_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -66,8 +64,8 @@ export interface PlanGateOptions {
   ttlMs?: number;
   /** Shared across gates (one per request on the remote server). */
   cache?: PlanTierCache;
-  /** Wording of the no-user-id error. Defaults to the stdio wording. */
-  hints?: Pick<ModeHints, "tokenNoUser">;
+  /** Wording of the no-user-id and plan errors. Defaults to the stdio wording. */
+  hints?: Pick<ModeHints, "tokenNoUser" | "planRequired">;
 }
 
 /**
@@ -81,7 +79,7 @@ export class PlanGate {
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly cache: PlanTierCache;
-  private readonly hints: Pick<ModeHints, "tokenNoUser"> | undefined;
+  private readonly hints: Pick<ModeHints, "tokenNoUser" | "planRequired"> | undefined;
 
   constructor(options: PlanGateOptions) {
     this.http = options.http;
@@ -133,7 +131,7 @@ export class PlanGate {
   async requirePaidPlan(): Promise<void> {
     if (this.auth.mode === "deploy_token") return;
     const tier = await this.getPlanTier();
-    if (!isPaidTier(tier)) throw new MicropageError("PLAN_REQUIRED", UPGRADE_MESSAGE);
+    if (!isPaidTier(tier)) throw new MicropageError("PLAN_REQUIRED", (this.hints ?? STDIO_HINTS).planRequired);
   }
 
   clearCache(): void {

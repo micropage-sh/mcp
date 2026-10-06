@@ -47,6 +47,8 @@ interface Backend {
   deployProject: string;
   /** exchange-deploy-token refuses with plan_required (owner below Pro+). */
   deployPlanRequired?: boolean;
+  /** One Supabase path (and method, default GET) answers with this status and body. */
+  refuse?: { path: string; method?: string; status: number; body: unknown };
 }
 
 let backend: Backend;
@@ -109,6 +111,9 @@ async function route(input: string, init: RequestInit = {}): Promise<Response> {
     return externalRoutes[input]?.() ?? new Response("nope", { status: 404 });
   }
   if (backend.restUnauthorized && url.pathname.startsWith("/rest/v1/")) return json({ message: "JWT expired" }, 401);
+  if (backend.refuse && url.pathname === backend.refuse.path && (init.method ?? "GET") === (backend.refuse.method ?? "GET")) {
+    return json(backend.refuse.body, backend.refuse.status);
+  }
   const bearer = headers.authorization?.replace(/^Bearer /, "") ?? "";
   const sub = (() => {
     try {
@@ -251,6 +256,29 @@ describe("routes", () => {
     expect((await call("/mcp/extra")).status).toBe(404);
   });
 
+  it("serves the OpenAI apps challenge as plain text only when OPENAI_APPS_CHALLENGE is set", async () => {
+    const path = "/.well-known/openai-apps-challenge";
+    expect((await call(path)).status).toBe(404);
+    expect((await call(path, {}, env({ OPENAI_APPS_CHALLENGE: "" }))).status).toBe(404);
+    expect((await call(path, {}, env({ OPENAI_APPS_CHALLENGE: "  " }))).status).toBe(404);
+
+    const set = env({ OPENAI_APPS_CHALLENGE: "tok_123abc" });
+    const res = await call(path, {}, set);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.text()).toBe("tok_123abc");
+
+    const head = await call(path, { method: "HEAD" }, set);
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+    expect((await call(path, { method: "POST" }, set)).status).toBe(405);
+    expect((await call(`${path}/x`, {}, set)).status).toBe(404);
+    // No credentials needed, and none are looked at.
+    expect(calls).toEqual([]);
+    expect(logs.map((l) => (JSON.parse(l) as { route?: string }).route)).toContain("openai_challenge");
+  });
+
   it("refuses to serve /mcp without a confirmation key of at least 32 characters", async () => {
     const res = await rpc(oauthToken("user-a"), INIT, {}, env({ MCP_CONFIRM_KEY: "short" }));
     expect(res.status).toBe(500);
@@ -343,7 +371,8 @@ describe("authentication", () => {
     const c = await connect(DEPLOY_TOKEN, { "x-micropage-project": UUID });
     const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
     expect(res.isError).toBe(true);
-    expect(text(res)).toMatch(/Pro\+ plan[\s\S]*Upgrade at https:\/\/micropage\.sh\/pricing/);
+    expect(text(res)).toContain("Deploy tokens need the Pro+ plan.");
+    expect(text(res)).not.toMatch(/upgrade|pricing/i);
   });
 });
 
@@ -432,9 +461,14 @@ describe("serving", () => {
     const c = await connect(oauthToken("user-a"));
     const res = await c.callTool({ name: "list_projects", arguments: {} });
     expect(res.isError).toBe(true);
-    expect(text(res)).toMatch(/paid plans only/);
-    expect(text(res)).toMatch(/micropage\.sh\/pricing/);
+    expect(text(res)).toContain(REMOTE_OAUTH_HINTS.planRequired);
+    expect(text(res)).not.toMatch(/upgrade|pricing/i);
     expect(logs.some((l) => (JSON.parse(l) as { error_code?: string }).error_code === "PLAN_REQUIRED")).toBe(true);
+
+    const who = await c.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).toBeFalsy();
+    expect((who.structuredContent as { note: string | null }).note).toBe(REMOTE_OAUTH_HINTS.planRequiredNote);
+    expect(text(who)).not.toMatch(/upgrade|pricing/i);
   });
 
   it("refuses a body over 6 MiB with 413", async () => {
@@ -801,5 +835,52 @@ describe("hosted wording for login and deploy-token failures", () => {
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/reconnect/);
     noStdio(text(res));
+  });
+});
+
+describe("hosted plan refusals state the fact without an upgrade pitch", () => {
+  // "/pricing", not "pricing": an example page is named components-pricing-and-forms.
+  const noPitch = (s: string) => expect(s).not.toMatch(/upgrade|\/pricing/i);
+  const PLAN_BODY = {
+    error: "Custom domains require the Pro plan. Upgrade at /pricing.",
+    code: "plan_required",
+    required_tier: "pro",
+    upgrade_url: "https://micropage.sh/pricing",
+  };
+
+  it("the remote plan wording itself names no upgrade or pricing page, in both modes", () => {
+    for (const hints of [REMOTE_OAUTH_HINTS, REMOTE_DEPLOY_TOKEN_HINTS]) {
+      expect(hints.upgradeLinks).toBe(false);
+      for (const s of [hints.planRequired, hints.planRequiredNote, hints.sendLimitAdvice, hints.quotaAdvice, hints.projectLimitAdvice]) noPitch(s);
+    }
+  });
+
+  it.each([
+    ["OAuth", () => connect(oauthToken("user-a"))],
+    ["deploy token", () => connect(DEPLOY_TOKEN, { "x-micropage-project": UUID })],
+  ])("%s: a server plan refusal keeps the server's reason and drops its upgrade link", async (_mode, open) => {
+    const c = await open();
+    backend.refuse = { path: "/rest/v1/projects", status: 403, body: PLAN_BODY };
+    const res = await c.callTool({ name: "get_project", arguments: { project: UUID } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("Custom domains require the Pro plan.");
+    noPitch(text(res));
+  });
+
+  it.each([
+    ["OAuth", () => connect(oauthToken("user-a"))],
+    ["deploy token", () => connect(DEPLOY_TOKEN, { "x-micropage-project": UUID })],
+  ])("%s: no tool description mentions upgrading or pricing", async (_mode, open) => {
+    const c = await open();
+    noPitch(JSON.stringify((await c.listTools()).tools));
+  });
+
+  it("OAuth: the project-limit refusal asks for a deletion only", async () => {
+    const c = await connect(oauthToken("user-a"));
+    backend.refuse = { path: "/rest/v1/projects", method: "POST", status: 403, body: { message: "new row violates row-level security policy" } };
+    const res = await c.callTool({ name: "create_project", arguments: { name: "Another" } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain(REMOTE_OAUTH_HINTS.projectLimitAdvice);
+    noPitch(text(res));
   });
 });

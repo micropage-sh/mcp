@@ -119,7 +119,7 @@ export async function runUploadAsset(ctx: ToolContext, args: z.infer<typeof Uplo
   });
   assertContentMatchesExtension(filename, bytes);
 
-  const result = await uploadAsset(ctx.http, project.id, filename, bytes);
+  const result = await uploadAsset(ctx.http, project.id, filename, bytes, ctx.hints);
   return {
     filename: result.file.filename ?? filename,
     markup: `img: <- ${result.file.filename ?? filename}`,

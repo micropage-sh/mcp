@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { MicropageError } from "./errors.js";
 import { eq, gt, inList, is, type Http } from "./http.js";
 
@@ -264,7 +265,12 @@ export interface PublishPostResponse extends RebuildField {
   recipient_count: number;
 }
 
-export async function publishPost(http: Http, projectId: number, slug: string): Promise<PublishPostResponse> {
+export async function publishPost(
+  http: Http,
+  projectId: number,
+  slug: string,
+  hints: Pick<ModeHints, "sendLimitAdvice"> = STDIO_HINTS,
+): Promise<PublishPostResponse> {
   try {
     return await http.invoke<PublishPostResponse>("publish-post", { project_id: projectId, slug });
   } catch (err) {
@@ -280,8 +286,8 @@ export async function publishPost(http: Http, projectId: number, slug: string): 
       throw new MicropageError(
         "PLAN_LIMIT",
         `micropage refused to send this post: ${serverMessage(err) ?? "the plan does not allow it"}. ` +
-          "Newsletter sends need a Pro plan and count against a monthly recipient limit; " +
-          "tell the user (upgrade at https://micropage.sh/pricing). No email went out and the site was not rebuilt, " +
+          `Newsletter sends need a Pro plan and count against a monthly recipient limit; ${hints.sendLimitAdvice} ` +
+          "No email went out and the site was not rebuilt, " +
           "but the post may now be marked published; check with list_posts.",
         { status: 402, data: err.data, cause: err },
       );

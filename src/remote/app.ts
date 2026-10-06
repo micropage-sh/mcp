@@ -49,6 +49,7 @@ export interface RemoteWorker {
 }
 
 const PRM_PATH = "/.well-known/oauth-protected-resource";
+const OPENAI_CHALLENGE_PATH = "/.well-known/openai-apps-challenge";
 const CONFIRM_KEY_MIN_LENGTH = 32;
 
 /**
@@ -220,6 +221,8 @@ export function createWorker(options: WorkerOptions = {}): RemoteWorker {
           response = await serveMcp(request, env, entry);
         } else if (url.pathname === PRM_PATH || url.pathname === `${PRM_PATH}${MCP_PATH}`) {
           response = protectedResourceMetadata(request, env, (cause) => misconfigured(entry, cause));
+        } else if (url.pathname === OPENAI_CHALLENGE_PATH) {
+          response = openaiAppsChallenge(request, env);
         } else if (url.pathname === "/healthz" && (request.method === "GET" || request.method === "HEAD")) {
           response = Response.json({ ok: true, name: SERVER_NAME, version: VERSION });
         } else {
@@ -294,6 +297,7 @@ function routeName(path: string): string {
   if (path === MCP_PATH) return "mcp";
   if (path === PRM_PATH || path === `${PRM_PATH}${MCP_PATH}`) return "prm";
   if (path === "/healthz") return "healthz";
+  if (path === OPENAI_CHALLENGE_PATH) return "openai_challenge";
   return "other";
 }
 
@@ -331,6 +335,18 @@ function protectedResourceMetadata(request: Request, env: Env, misconfigured: (c
   const problem = resourceUrlProblem(env);
   if (problem) return misconfigured(problem);
   return Response.json(buildMetadata(env), { headers: { ...cors, "Cache-Control": "public, max-age=3600" } });
+}
+
+/** OpenAI's domain-verification token. Public; cached briefly so a rotated token shows up quickly. */
+function openaiAppsChallenge(request: Request, env: Env): Response {
+  const token = env.OPENAI_APPS_CHALLENGE?.trim();
+  if (!token) return Response.json({ error: "not_found" }, { status: 404 });
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return Response.json({ error: "method_not_allowed" }, { status: 405, headers: { Allow: "GET, HEAD" } });
+  }
+  return new Response(request.method === "HEAD" ? null : token, {
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300" },
+  });
 }
 
 function corsHeaders(origin: string, request: Request): Record<string, string> {

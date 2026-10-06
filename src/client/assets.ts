@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { VERSION } from "../version.js";
 import { MicropageError, isMicropageError } from "./errors.js";
 import type { FetchLike, Http } from "./http.js";
@@ -477,6 +478,7 @@ export async function uploadFile(
   filename: string,
   bytes: Uint8Array,
   contentHash: string,
+  hints: Pick<ModeHints, "quotaAdvice"> = STDIO_HINTS,
 ): Promise<UserFile> {
   try {
     const data = await http.request<{ file?: UserFile } | null>("POST", http.functionUrl("upload-file"), {
@@ -485,23 +487,22 @@ export async function uploadFile(
     if (!data?.file?.id) throw new MicropageError("HTTP", "upload-file returned no file record. Call list_files to check whether it landed.");
     return data.file;
   } catch (err) {
-    if (isMicropageError(err) && err.status === 413) throw quotaError(err.data, bytes.length);
+    if (isMicropageError(err) && err.status === 413) throw quotaError(err.data, bytes.length, hints);
     throw err;
   }
 }
 
-function quotaError(data: unknown, fileSize: number): MicropageError {
+function quotaError(data: unknown, fileSize: number, hints: Pick<ModeHints, "quotaAdvice">): MicropageError {
   const d = (data && typeof data === "object" ? data : {}) as { current_usage?: number; max_bytes?: number; file_size?: number };
   const used = typeof d.current_usage === "number" ? formatMb(d.current_usage) : "unknown";
   const limit = typeof d.max_bytes === "number" ? formatMb(d.max_bytes) : "the plan limit";
-  return quotaMessage(used, limit, formatMb(typeof d.file_size === "number" ? d.file_size : fileSize), data);
+  return quotaMessage(used, limit, formatMb(typeof d.file_size === "number" ? d.file_size : fileSize), hints, data);
 }
 
-function quotaMessage(used: string, limit: string, size: string, data?: unknown): MicropageError {
+function quotaMessage(used: string, limit: string, size: string, hints: Pick<ModeHints, "quotaAdvice">, data?: unknown): MicropageError {
   return new MicropageError(
     "QUOTA_EXCEEDED",
-    `Storage quota exceeded: this project uses ${used} of its ${limit} plan limit and the file is ${size}. ` +
-      "Tell the user to delete unused files in the micropage editor or upgrade at https://micropage.sh/pricing, or upload a smaller file.",
+    `Storage quota exceeded: this project uses ${used} of its ${limit} plan limit and the file is ${size}. ${hints.quotaAdvice}`,
     { status: 413, data },
   );
 }
@@ -523,7 +524,13 @@ export interface UploadAssetResult {
  * failure is fatal, as in the CLI, since uploading blind would leave
  * duplicate rows under one name.
  */
-export async function uploadAsset(http: Http, projectId: number, filename: string, bytes: Uint8Array): Promise<UploadAssetResult> {
+export async function uploadAsset(
+  http: Http,
+  projectId: number,
+  filename: string,
+  bytes: Uint8Array,
+  hints: Pick<ModeHints, "quotaAdvice"> = STDIO_HINTS,
+): Promise<UploadAssetResult> {
   const hash = sha256Hex(bytes);
   const listing = await listFiles(http, projectId);
   // Map semantics match the CLI: with duplicate names, the last row wins.
@@ -539,13 +546,13 @@ export async function uploadAsset(http: Http, projectId: number, filename: strin
   const limitBytes = listing.space_available_mb * MB;
   const usedAfterDelete = listing.total_bytes - (existing?.size_bytes ?? 0);
   if (usedAfterDelete + bytes.length > limitBytes) {
-    throw quotaMessage(formatMb(listing.total_bytes), `${listing.space_available_mb} MB`, formatMb(bytes.length));
+    throw quotaMessage(formatMb(listing.total_bytes), `${listing.space_available_mb} MB`, formatMb(bytes.length), hints);
   }
 
   if (existing) await deleteFile(http, existing.id);
   let file: UserFile;
   try {
-    file = await uploadFile(http, projectId, filename, bytes, hash);
+    file = await uploadFile(http, projectId, filename, bytes, hash, hints);
   } catch (err) {
     if (existing && isMicropageError(err)) {
       throw new MicropageError(

@@ -523,7 +523,7 @@ export async function runPublishPost(
   }
 
   const cursor = post.web_visibility !== "none" ? await projectCursor(ctx, project) : null;
-  const res = await publishPost(ctx.http, project.id, post.slug!);
+  const res = await publishPost(ctx.http, project.id, post.slug!, ctx.hints);
   const rebuild = rebuildOutcome(res, project, post.web_visibility !== "none" && project.active_build_id !== null, cursor);
   const notes = [
     res.emailed ? `Emailed to ${res.recipient_count} recipient(s); sending runs in the background.` : "Published on the web only; no email.",

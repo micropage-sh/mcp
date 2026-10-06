@@ -42,6 +42,10 @@ SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS
 # "claude.ai"). Requests without an Origin header (server-side MCP clients)
 # always pass; an Origin not listed here gets 403.
 ALLOWED_ORIGINS = ""
+# OpenAI apps domain-verification token, served as text/plain at
+# /.well-known/openai-apps-challenge. Unset or empty: that path answers 404.
+# Set it here (or with `wrangler secret put`) only when OpenAI asks for it:
+# OPENAI_APPS_CHALLENGE = ""
 
 # Secrets (not vars), set with `wrangler secret put <NAME>`:
 #   MCP_CONFIRM_KEY  at least 32 random characters; signs preview_post_send

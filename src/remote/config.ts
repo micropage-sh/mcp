@@ -17,6 +17,8 @@ export interface Env {
   MCP_CONFIRM_KEY?: string;
   /** Comma-separated browser Origin hostnames allowed to call /mcp. Requests without an Origin always pass. */
   ALLOWED_ORIGINS?: string;
+  /** OpenAI apps domain-verification token, served at /.well-known/openai-apps-challenge; unset or empty serves 404. */
+  OPENAI_APPS_CHALLENGE?: string;
   APP_URL?: string;
   BUILD_COMPILER_URL?: string;
   BASE_DOMAIN?: string;

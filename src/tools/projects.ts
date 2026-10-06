@@ -360,7 +360,7 @@ export async function runCreateProject(
       throw new MicropageError(
         "PROJECT_LIMIT",
         "micropage refused to create another project, most likely because the account is at its plan's project " +
-          "limit (Pro: 5, Pro+: 20). Tell the user to delete an unused project or upgrade. Nothing was created.",
+          `limit (Pro: 5, Pro+: 20). ${ctx.hints.projectLimitAdvice} Nothing was created.`,
         { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
       );
     }
