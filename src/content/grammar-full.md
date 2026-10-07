@@ -106,9 +106,11 @@ submit: Get early access
 
 ## Plans (for support answers)
 
-- Free: 1 project, starter AI credits, 100 submissions, `*.micropage.sh` host, badge
-- Pro ($6/mo or $49/yr): custom domain, CLI, MCP server, zip export, CSV, no badge, 5 projects
-- Pro+ ($12/mo or $96/yr): webhooks, CI deploy tokens, 20 projects
+Prices are in USD and exclude VAT/sales tax; Paddle (merchant of record) adds tax for the buyer's country at checkout. Form submission limits are per project, per calendar month (UTC); spam-flagged submissions don't count.
+
+- Free: 1 project, starter AI credits, 100 submissions per project per month, `*.micropage.sh` host, badge
+- Pro ($6/mo or $49/yr): custom domain, newsletter sending (optionally from your own sending domain), CLI, MCP server, zip export, CSV, daily submission digest, no badge, 5 projects, 1,000 submissions per project per month
+- Pro+ ($12/mo or $98/yr): everything in Pro, plus webhooks, instant email per submission, CI deploy tokens, priority builds, 20 projects, 10,000 submissions per project per month
 
 ---
 
@@ -260,6 +262,10 @@ Forms include:
 
 - a hidden honeypot field
 - server-side validation: only fields defined in markup are accepted, and required fields (label ending with `*`, including on `select`, `checkboxes`, and `radios`) must be present on submit
+- Cloudflare Turnstile verification on the published page
+- an automatic content check for common spam patterns
+
+Submissions that fail Turnstile or look like spam are kept in a separate Spam view instead of the inbox. They don't send notifications or webhooks and don't create newsletter subscribers. Nothing is deleted automatically: the owner can move a submission back with Not spam, or flag one with Mark as spam.
 
 Notifications
 
@@ -275,13 +281,13 @@ Limits and plans
 
 | Capability | Free | Pro | Pro+ |
 |------------|------|-----|------|
-| Submissions | 100 total | 1,000 / month | 10,000 / month |
+| Submissions per project per month | 100 | 1,000 | 10,000 |
 | CSV export | no | yes | yes |
 | Daily email digest | no | yes | yes |
 | Instant email per submission | no | no | yes |
 | Webhook | no | no | yes |
 
-Free is 100 submissions in total, not per project and not per month. Pro and Pro+ reset monthly.
+Limits apply per project, per calendar month (UTC) on every plan. Submissions flagged as spam don't count toward the limit.
 
 ## Custom Domains
 
