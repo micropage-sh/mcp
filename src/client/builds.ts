@@ -2,7 +2,7 @@ import * as z from "zod";
 
 import type { MicropageConfig } from "./config.js";
 import { MicropageError } from "./errors.js";
-import { eq, inList, type Http } from "./http.js";
+import { eq, gt, inList, is, lt, type Http } from "./http.js";
 import {
   collectParseIssues,
   countPages,
@@ -228,32 +228,32 @@ export async function saveDraft(
     };
   }
 
-  // The row is created before parsing so the compiler stamps the build's own
-  // id into the pages; it only becomes active once it holds compiled content.
-  const inserted = await http.insert<{ id: number; number: number | null; status: string | null }>("builds", {
-    project_id: input.projectId,
-    raw_content: input.text,
-    status: "draft",
-    parser_version: "2",
-  });
-  const created = inserted[0];
-  if (!created) throw new MicropageError("SAVE_FAILED", "Creating the draft build returned no row. Retry; if it persists, check list_builds.");
+  // The row exists before parsing so the compiler stamps the build's own id
+  // into the pages; it only becomes active once it holds compiled content.
+  // An empty draft left by an earlier failed save is taken over rather than
+  // forking another one on every retry.
+  const created =
+    (await claimEmptyDraft(http, input.projectId, input.activeBuildId, input.text)) ??
+    (await insertDraft(http, input.projectId, input.text));
 
   const { json, issues, page_count } = await compile(created.id).catch((err: unknown) => {
+    rememberLeftover(input.projectId, created.id);
     throw uncompiledDraft(err, created);
   });
 
   const rows = await http
-    .patch<{ id: number; number: number | null; status: string | null }>(
+    .patch<DraftRow>(
       "builds",
       { id: eq(created.id), project_id: eq(input.projectId), status: inList(EDITABLE_STATUSES) },
       { json_content: json },
     )
     .catch((err: unknown) => {
+      rememberLeftover(input.projectId, created.id);
       throw uncompiledDraft(err, created);
     });
   const row = rows[0];
   if (!row) throw draftMoved(created.number, "no longer a draft");
+  ownLeftovers.delete(input.projectId);
   await setActiveBuild(http, input.projectId, row.id);
   return {
     build: { id: row.id, number: row.number ?? created.number ?? null, status: row.status ?? created.status ?? "draft" },
@@ -265,8 +265,87 @@ export async function saveDraft(
   };
 }
 
+type DraftRow = { id: number; number: number | null; status: string | null };
+
 /**
- * Failing to parse or store the compiled content after the new row exists
+ * Another client's draft that has no compiled content yet may simply be
+ * mid-save (inserted, still parsing), so only drafts at least this old are
+ * taken over unless this process left them behind itself.
+ */
+export const LEFTOVER_MIN_AGE_MS = 120 * 1000;
+
+/**
+ * Drafts this process left uncompiled, by project id, so its own retry reuses
+ * one at once. Best effort: lost on restart, and a hosted isolate may not see
+ * the retry; the age-gated lookup covers those.
+ */
+const ownLeftovers = new Map<number, number>();
+const OWN_LEFTOVERS_MAX = 500;
+
+function rememberLeftover(projectId: number, buildId: number): void {
+  ownLeftovers.delete(projectId);
+  if (ownLeftovers.size >= OWN_LEFTOVERS_MAX) {
+    const oldest = ownLeftovers.keys().next().value;
+    if (oldest !== undefined) ownLeftovers.delete(oldest);
+  }
+  ownLeftovers.set(projectId, buildId);
+}
+
+/** Test hook: forget the drafts this process left behind. */
+export function resetOwnLeftovers(): void {
+  ownLeftovers.clear();
+}
+
+/**
+ * A leftover from a failed save_page: a draft that never got compiled content
+ * and is not active. Only rows with a higher id than the active build qualify,
+ * so a draft abandoned before the current build became active (or the
+ * template-less draft the editor seeds a new project with, once something else
+ * replaced it) is left alone. Ids come from one sequence and only grow, so they
+ * order rows reliably; created_at is only used for the age threshold.
+ *
+ * The raw_content write is filtered on the row still being an uncompiled
+ * draft. That only skips rows filled, published or deleted since the lookup;
+ * it does not make the claim exclusive, which is what the age threshold is for.
+ * When nothing matches, a fresh draft is inserted instead.
+ */
+async function claimEmptyDraft(http: Http, projectId: number, activeBuildId: number | null, text: string): Promise<DraftRow | null> {
+  const emptyDraft: Record<string, string> = { project_id: eq(projectId), status: eq("draft"), json_content: is("null") };
+  if (activeBuildId !== null) emptyDraft.id = gt(activeBuildId);
+  const claim = async (id: number) => {
+    const rows = await http.patch<DraftRow>("builds", { ...emptyDraft, id: eq(id) }, { raw_content: text, parser_version: "2" });
+    return rows[0] ?? null;
+  };
+
+  const own = ownLeftovers.get(projectId);
+  if (own !== undefined && (activeBuildId === null || own > activeBuildId)) {
+    const row = await claim(own);
+    if (row) return row;
+  }
+  if (own !== undefined) ownLeftovers.delete(projectId);
+
+  const leftover = await http.selectOne<DraftRow>("builds", {
+    select: "id,number,status",
+    filters: { ...emptyDraft, created_at: lt(new Date(Date.now() - LEFTOVER_MIN_AGE_MS).toISOString()) },
+    order: "id.desc",
+  });
+  return leftover ? claim(leftover.id) : null;
+}
+
+async function insertDraft(http: Http, projectId: number, text: string): Promise<DraftRow> {
+  const inserted = await http.insert<DraftRow>("builds", {
+    project_id: projectId,
+    raw_content: text,
+    status: "draft",
+    parser_version: "2",
+  });
+  const created = inserted[0];
+  if (!created) throw new MicropageError("SAVE_FAILED", "Creating the draft build returned no row. Retry; if it persists, check list_builds.");
+  return created;
+}
+
+/**
+ * Failing to parse or store the compiled content after the draft row exists
  * leaves that row as an inactive, uncompiled draft. The active build is
  * untouched, so the model is told the project is unchanged and a retry is
  * safe, rather than "Nothing was saved".
@@ -277,8 +356,8 @@ function uncompiledDraft(err: unknown, build: { id: number; number: number | nul
   if (!/[.!?]$/.test(reason)) reason += ".";
   return new MicropageError(
     err.code,
-    `${reason} Draft v${build.number ?? "?"} (id:${build.id}) had already been created; it holds no compiled pages and was not made active, ` +
-      "so the project's active build and live site are unchanged. Fix the problem and call save_page again; ignore that empty draft.",
+    `${reason} Draft v${build.number ?? "?"} (id:${build.id}) holds no compiled pages and was not made active, ` +
+      "so the project's active build and live site are unchanged. Fix the problem and call save_page again. A retry may reuse that empty draft; you can ignore it.",
     { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
   );
 }

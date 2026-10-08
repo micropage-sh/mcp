@@ -37,6 +37,7 @@ export const neq = (v: string | number | boolean): string => `neq.${v}`;
 export const is = (v: "null" | "true" | "false"): string => `is.${v}`;
 export const inList = (vs: ReadonlyArray<string | number>): string => `in.(${vs.join(",")})`;
 export const gt = (v: string | number): string => `gt.${v}`;
+export const lt = (v: string | number): string => `lt.${v}`;
 
 export interface SelectOptions {
   select?: string;

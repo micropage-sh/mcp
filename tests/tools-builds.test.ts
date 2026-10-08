@@ -6,6 +6,7 @@ import { DESTRUCTIVE, OUT, RO, WRITE } from "../src/annotations.js";
 import type { Clock } from "../src/client/deploy-events.js";
 import { createDeps } from "../src/node/deps.js";
 import { createServer } from "../src/server.js";
+import { LEFTOVER_MIN_AGE_MS, resetOwnLeftovers } from "../src/client/builds.js";
 import { buildToolsClock } from "../src/tools/builds.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
 import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
@@ -21,6 +22,7 @@ const realClockRef = buildToolsClock.current;
 
 beforeEach(async () => {
   elicited = [];
+  resetOwnLeftovers();
   cfg = await tempConfig();
   await cfg.write({ access_token: tokenFor("user-1", 3600), refresh_token: "r1", user: { id: "user-1" } });
 });
@@ -44,6 +46,8 @@ interface BuildState {
   failure_reason: string | null;
   raw_content: string | null;
   llms_txt: string | null;
+  /** Stands in for json_content; only whether it is null matters here. */
+  json_content: unknown;
 }
 
 interface EventState {
@@ -67,6 +71,8 @@ interface Backend {
   statusPolls: number;
   parse: (call: RecordedCall) => { status?: number; body: unknown };
   deleteStatus?: number;
+  /** Runs before each PATCH of builds is applied, to simulate another writer. */
+  beforeBuildPatch?: (b: Backend) => void;
   /** HTTP status a PATCH of builds answers with instead of success. */
   buildPatchStatus?: number;
   /** HTTP status publish-build answers with instead of success. */
@@ -86,6 +92,7 @@ function build(overrides: Partial<BuildState> & { id: number; number: number }):
     failure_reason: null,
     raw_content: "[site]\ntitle: Old",
     llms_txt: null,
+    json_content: { site: { title: "Old" } },
     ...overrides,
   };
 }
@@ -106,10 +113,22 @@ function backend(overrides: Partial<Backend> = {}): Backend {
 
 const unq = (v: string | null | undefined) => v?.replace(/^(eq|gt)\./, "");
 
+const BUILD_PARAMS = new Set(["select", "order", "limit", "id", "number", "status", "project_id", "json_content", "created_at"]);
+
 function filterBuilds(b: Backend, q: URLSearchParams): BuildState[] {
+  for (const key of q.keys()) if (!BUILD_PARAMS.has(key)) throw new Error(`fake builds: unsupported filter ${key}=${q.get(key)}`);
+  const projectId = q.get("project_id");
+  if (projectId && projectId !== "eq.7") throw new Error(`fake builds: unsupported project filter ${projectId}`);
+  const json = q.get("json_content");
+  if (json && json !== "is.null") throw new Error(`fake builds: unsupported json_content filter ${json}`);
+  const createdAt = q.get("created_at");
+  if (createdAt && !createdAt.startsWith("lt.")) throw new Error(`fake builds: unsupported created_at filter ${createdAt}`);
   let rows = [...b.builds];
-  const id = unq(q.get("id"));
-  if (id) rows = rows.filter((r) => r.id === Number(id));
+  if (createdAt) rows = rows.filter((r) => Date.parse(r.created_at) < Date.parse(createdAt.slice(3)));
+  const id = q.get("id");
+  if (id?.startsWith("gt.")) rows = rows.filter((r) => r.id > Number(id.slice(3)));
+  else if (id) rows = rows.filter((r) => r.id === Number(unq(id)));
+  if (q.get("json_content") === "is.null") rows = rows.filter((r) => r.json_content === null);
   const number = unq(q.get("number"));
   if (number) rows = rows.filter((r) => r.number === Number(number));
   const status = q.get("status");
@@ -117,6 +136,7 @@ function filterBuilds(b: Backend, q: URLSearchParams): BuildState[] {
   if (inList) rows = rows.filter((r) => inList.includes(r.status));
   else if (status) rows = rows.filter((r) => r.status === unq(status));
   if (q.get("order") === "number.desc") rows.sort((x, y) => y.number - x.number);
+  if (q.get("order") === "id.desc") rows.sort((x, y) => y.id - x.id);
   const limit = q.get("limit");
   return limit ? rows.slice(0, Number(limit)) : rows;
 }
@@ -164,13 +184,21 @@ function serve(b: Backend): FakeFetch {
       }
       case "PATCH /rest/v1/builds": {
         if (b.buildPatchStatus) return { status: b.buildPatchStatus, body: { message: "upstream down" } };
+        b.beforeBuildPatch?.(b);
         const rows = filterBuilds(b, q);
-        const body = call.body as { raw_content?: string };
+        const body = call.body as { raw_content?: string; json_content?: unknown };
         if (body.raw_content !== undefined) for (const r of rows) r.raw_content = body.raw_content;
+        if (body.json_content !== undefined) for (const r of rows) r.json_content = body.json_content;
         return { body: rows };
       }
       case "POST /rest/v1/builds": {
-        const next = build({ id: 100, number: Math.max(0, ...b.builds.map((x) => x.number)) + 1, status: "draft" });
+        const next = build({
+          id: Math.max(99, ...b.builds.map((x) => x.id)) + 1,
+          number: Math.max(0, ...b.builds.map((x) => x.number)) + 1,
+          status: "draft",
+          json_content: null,
+          created_at: new Date().toISOString(),
+        });
         b.builds.push(next);
         return { status: 201, body: [next] };
       }
@@ -451,6 +479,168 @@ describe("save_page", () => {
     expect((callsTo(fake, "POST", "parse")[0]!.body as { build_id: unknown }).build_id).toBe(100);
     expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
     expect(b.activeBuildId).toBe(30);
+  });
+
+  it("reuses at once the empty draft its own failed save left behind, and makes it active", async () => {
+    let parses = 0;
+    const b = backend({
+      parse: () => (++parses === 1 ? { status: 502, body: { error: "bad gateway" } } : { body: { site: { title: "New" }, pages: [] } }),
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const failed = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(failed.isError).toBe(true);
+    expect(text(failed)).toMatch(/Draft v5 \(id:100\).*may reuse that empty draft; you can ignore it/);
+    expect(b.builds.find((x) => x.id === 100)!.created_at > new Date(Date.now() - 60_000).toISOString()).toBe(true);
+    expect(b.activeBuildId).toBe(30);
+
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "y" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(callsTo(fake, "POST", "parse").map((p) => (p.body as { build_id: unknown }).build_id)).toEqual([100, 100]);
+
+    const [claim, fill] = callsTo(fake, "PATCH", "/rest/v1/builds");
+    const cq = new URL(claim!.url).searchParams;
+    expect(cq.get("id")).toBe("eq.100");
+    expect(cq.get("project_id")).toBe("eq.7");
+    expect(cq.get("status")).toBe("eq.draft");
+    expect(cq.get("json_content")).toBe("is.null");
+    expect(claim!.body).toEqual({ raw_content: "y", parser_version: "2" });
+    const fq = new URL(fill!.url).searchParams;
+    expect(fq.get("id")).toBe("eq.100");
+    expect(fq.get("status")).toBe("in.(draft,failed)");
+    expect(fill!.body).toEqual({ json_content: { site: { title: "New" }, pages: [] } });
+
+    expect(b.activeBuildId).toBe(100);
+    expect(b.builds.filter((x) => x.id === 100)).toMatchObject([{ raw_content: "y", json_content: { site: { title: "New" } } }]);
+    expect(res.structuredContent).toMatchObject({ action: "created_draft", build: { id: 100, number: 5 }, previous_active_build_id: 30 });
+  });
+
+  it("names the reused draft when it fails again, leaving the active build alone", async () => {
+    const b = backend({
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5, status: "draft", json_content: null })],
+      parse: () => ({ status: 502, body: { error: "bad gateway" } }),
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Draft v5 \(id:31\).*not made active/);
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(0);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
+    expect(b.activeBuildId).toBe(30);
+  });
+
+  it("looks only for uncompiled drafts newer than the active build, newest first, and inserts when there is none", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    const lookup = fake.calls.find((call) => call.method === "GET" && path(call) === "/rest/v1/builds" && new URL(call.url).searchParams.has("json_content"));
+    const lq = new URL(lookup!.url).searchParams;
+    expect(lq.get("project_id")).toBe("eq.7");
+    expect(lq.get("status")).toBe("eq.draft");
+    expect(lq.get("json_content")).toBe("is.null");
+    expect(lq.get("id")).toBe("gt.30");
+    const cutoff = Date.parse(lq.get("created_at")!.replace(/^lt\./, ""));
+    expect(lq.get("created_at")).toMatch(/^lt\./);
+    expect(Date.now() - cutoff).toBeGreaterThanOrEqual(LEFTOVER_MIN_AGE_MS - 1000);
+    expect(Date.now() - cutoff).toBeLessThan(LEFTOVER_MIN_AGE_MS + 60_000);
+    expect(lq.get("order")).toBe("id.desc");
+    expect(lq.get("limit")).toBe("1");
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(res.structuredContent).toMatchObject({ action: "created_draft", build: { id: 100 } });
+  });
+
+  it("does not reuse an empty draft older than the active build", async () => {
+    const b = backend({ builds: [build({ id: 20, number: 3, status: "draft", json_content: null }), build({ id: 30, number: 4 })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(callsTo(fake, "PATCH", "/rest/v1/builds").map((p) => new URL(p.url).searchParams.get("id"))).toEqual(["eq.100"]);
+    expect(b.builds.find((x) => x.id === 20)).toMatchObject({ raw_content: "[site]\ntitle: Old", json_content: null });
+    expect(res.structuredContent).toMatchObject({ build: { id: 100 }, previous_active_build_id: 30 });
+  });
+
+  it("never takes the active build as the leftover, even an uncompiled one", async () => {
+    const b = backend({ builds: [build({ id: 30, number: 4, status: "deployed", json_content: null })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "PATCH", "/rest/v1/builds").map((p) => new URL(p.url).searchParams.get("id"))).toEqual(["eq.100"]);
+    expect(b.builds.find((x) => x.id === 30)).toMatchObject({ raw_content: "[site]\ntitle: Old", json_content: null });
+    expect(b.activeBuildId).toBe(100);
+  });
+
+  it("inserts a new draft when the leftover is filled by someone else between lookup and claim", async () => {
+    const b = backend({
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5, status: "draft", json_content: null })],
+      beforeBuildPatch: (s) => {
+        const leftover = s.builds.find((x) => x.id === 31)!;
+        if (leftover.json_content === null) leftover.json_content = { site: { title: "Theirs" } };
+      },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(b.builds.find((x) => x.id === 31)).toMatchObject({ raw_content: "[site]\ntitle: Old", json_content: { site: { title: "Theirs" } } });
+    expect(res.structuredContent).toMatchObject({ build: { id: 100, number: 6 } });
+    expect(b.activeBuildId).toBe(100);
+  });
+
+  it("skips another client's uncompiled draft younger than the age threshold, since it may still be mid-save", async () => {
+    const fresh = new Date(Date.now() - 10_000).toISOString();
+    const b = backend({ builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5, status: "draft", json_content: null, created_at: fresh })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(callsTo(fake, "PATCH", "/rest/v1/builds").map((p) => new URL(p.url).searchParams.get("id"))).toEqual(["eq.100"]);
+    expect(b.builds.find((x) => x.id === 31)).toMatchObject({ raw_content: "[site]\ntitle: Old", json_content: null });
+    expect(b.activeBuildId).toBe(100);
+  });
+
+  it("inserts a new draft when the leftover stops being a draft between lookup and claim", async () => {
+    const b = backend({
+      builds: [build({ id: 30, number: 4 }), build({ id: 31, number: 5, status: "draft", json_content: null })],
+      beforeBuildPatch: (s) => {
+        const leftover = s.builds.find((x) => x.id === 31)!;
+        if (leftover.status === "draft") leftover.status = "publishing";
+      },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    const claim = callsTo(fake, "PATCH", "/rest/v1/builds")[0]!;
+    expect(new URL(claim.url).searchParams.get("id")).toBe("eq.31");
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(b.builds.find((x) => x.id === 31)).toMatchObject({ raw_content: "[site]\ntitle: Old", status: "publishing" });
+    expect(res.structuredContent).toMatchObject({ build: { id: 100 } });
+    expect(b.activeBuildId).toBe(100);
+  });
+
+  it("with no active build, reuses an old enough uncompiled draft without an id bound", async () => {
+    const b = backend({ activeBuildId: null, builds: [build({ id: 31, number: 1, status: "draft", json_content: null })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    const lookup = fake.calls.find((call) => call.method === "GET" && path(call) === "/rest/v1/builds" && new URL(call.url).searchParams.has("json_content"));
+    const lq = new URL(lookup!.url).searchParams;
+    expect(lq.has("id")).toBe(false);
+    expect(lq.get("created_at")).toMatch(/^lt\./);
+    const claim = callsTo(fake, "PATCH", "/rest/v1/builds")[0]!;
+    expect(new URL(claim.url).searchParams.get("id")).toBe("eq.31");
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(0);
+    expect(b.activeBuildId).toBe(31);
+    expect(res.structuredContent).toMatchObject({ action: "created_draft", build: { id: 31 }, previous_active_build_id: null });
   });
 
   it("writes nothing when parsing fails while overwriting the active draft", async () => {
