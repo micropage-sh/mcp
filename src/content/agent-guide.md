@@ -42,8 +42,9 @@ uploaded automatically and rewritten to hosted URLs on push.
 A companion image file next to the post (`posts/launch.md` + `posts/launch.png`) is used as the hero automatically, taking priority over `hero:` in front-matter.
 
 Commands:
-- `micropage posts push` — upload local `posts/*.md` (create or update by slug); never deletes remote posts.
-- `micropage posts pull` — write remote posts to local `posts/*.md` files.
+- `micropage posts push [slugs...]` — upload local `posts/*.md` (create or update by slug); pushes only new and changed posts and refuses to overwrite a post edited remotely since the last push/pull unless `--force`; `--dry-run` shows what would happen. Never deletes remote posts.
+- `micropage posts pull [slugs...]` — write remote posts to local `posts/*.md` files.
+- `micropage posts publish [slug]` — publish a post (or every local draft); sends email for posts with `email: true` + `list:`. Re-emailing a post that is published or was emailed before needs `micropage posts publish <slug> --resend`; only do that when the user asks.
 - `micropage posts list` — list remote posts.
 - `micropage posts rm <slug>` — delete a post remotely (local file is untouched).
 

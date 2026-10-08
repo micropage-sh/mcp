@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DESTRUCTIVE, OUT, RO } from "../src/annotations.js";
-import { postContentFingerprint, type PostRow } from "../src/client/posts.js";
+import { postContentFingerprint, postMatchesPayload, type PostRow, type UpsertPostPayload } from "../src/client/posts.js";
 import { createDeps } from "../src/node/deps.js";
 import { createServer } from "../src/server.js";
 import { createFakeFetch, type FakeFetch, type RecordedCall } from "./helpers/fake-fetch.js";
@@ -371,6 +371,156 @@ describe("upsert_post", () => {
     const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b", date: "2099-01-01" } });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/date is in the future; scheduling posts is not supported/);
+  });
+});
+
+describe("upsert_post unchanged short-circuit", () => {
+  const base = { project: "acme", title: "Hello", body_markdown: "Body" };
+
+  it("skips a save of a published post that changes nothing, with no confirm, write or cursor", async () => {
+    const fake = serve(backend({ posts: [post({ published_at: "2026-10-01T09:15:00Z" })] }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: base });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      post_id: "post-1",
+      slug: "hello",
+      action: "unchanged",
+      published: true,
+      rebuild_queued: false,
+      build_id: null,
+      after_event_id: null,
+      warnings: [expect.stringMatching(/Nothing changed[\s\S]*not rebuilt/)],
+    });
+    expect(mutatingCalls(fake)).toHaveLength(0);
+    expect(fake.calls.filter((call) => new URL(call.url).pathname === "/rest/v1/build_deploy_events")).toHaveLength(0);
+    expect(text(res)).toMatch(/unchanged \(nothing saved\)/);
+  });
+
+  it("treats trailing newlines, CRLF and a defaulted subject as unchanged", async () => {
+    const cases: Array<[Partial<PostRow>, Record<string, unknown>]> = [
+      [{}, { body_markdown: "Body\n" }],
+      [{ body_markdown: "Line 1\r\nLine 2\n\n" }, { body_markdown: "Line 1\nLine 2" }],
+      [{ body_markdown: "Line 1\nLine 2" }, { body_markdown: "Line 1\r\nLine 2  \n" }],
+      [{}, { body_markdown: "\n  \t\nBody" }],
+      [{ body_markdown: "\r\nBody\r" }, { body_markdown: "Body" }],
+      [{ body_markdown: "Line 1\rLine 2" }, { body_markdown: "Line 1\nLine 2" }],
+      [{ subject: null }, {}],
+      [{ subject: "" }, { subject: "" }],
+      [{}, { subject: "Hello" }],
+      [{ subject: null }, { subject: "Hello" }],
+      [{ description: "", preheader: "", hero_image: "" }, { description: "" }],
+      [{ title: "Hello " }, { title: " Hello" }],
+    ];
+    for (const [row, args] of cases) {
+      const fake = serve(backend({ posts: [post(row)] }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: "upsert_post", arguments: { ...base, ...args } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(res.structuredContent, JSON.stringify([row, args])).toMatchObject({ action: "unchanged", published: false });
+      expect(mutatingCalls(fake), JSON.stringify([row, args])).toHaveLength(0);
+      await client?.close();
+      client = undefined;
+    }
+  });
+
+  it("still saves when any single field differs", async () => {
+    const changes: Array<[string, Partial<PostRow>, Record<string, unknown>]> = [
+      ["title", {}, { title: "Hello there", slug: "hello" }],
+      ["body", {}, { body_markdown: "Body!" }],
+      ["leading indentation", {}, { body_markdown: "  Body" }],
+      ["description", {}, { description: "Summary" }],
+      ["description cleared", { description: "Summary" }, {}],
+      ["hero", {}, { hero: "https://img.example/h.jpg" }],
+      ["visibility", {}, { visibility: "unlisted" }],
+      ["email", {}, { email: true, list: "Newsletter" }],
+      ["email off", { email_enabled: true, form_id: FORM_ID }, {}],
+      ["email flag out of step with the list", { email_enabled: false, form_id: FORM_ID }, { email: true, list: "Newsletter" }],
+      ["subject", {}, { subject: "Read me" }],
+      ["subject reset to title", { subject: "Custom" }, {}],
+      ["preview", {}, { preview: "Inbox text" }],
+      ["date on a draft", {}, { date: "2026-09-01" }],
+      ["different held date", { date_override: "2026-09-01T00:00:00.000Z" }, { date: "2026-09-02" }],
+    ];
+    for (const [name, row, args] of changes) {
+      const fake = serve(backend({ posts: [post(row)], upsert: () => ({ body: { post_id: "post-1", action: "updated", published: false } }) }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: "upsert_post", arguments: { ...base, ...args } });
+      expect(res.isError, `${name}: ${text(res)}`).toBeFalsy();
+      expect(res.structuredContent, name).toMatchObject({ action: "updated" });
+      expect(callsTo(fake, "upsert-post"), name).toHaveLength(1);
+      await client?.close();
+      client = undefined;
+    }
+  });
+
+  it("still requires confirm_live_update when a published post changes", async () => {
+    const fake = serve(backend({ posts: [post({ published_at: "2026-10-01T09:15:00Z" })] }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { ...base, description: "New" } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/CONFIRM_REQUIRED|confirm_live_update: true/);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("compares date only when given, with upsert-post's no-op rules", async () => {
+    const published = post({ published_at: "2026-10-01T09:15:00Z" });
+    const draftHeld = post({ date_override: "2026-09-01T00:00:00.000Z" });
+    const run = async (row: PostRow, date: string) => {
+      const fake = serve(backend({ posts: [row] }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: "upsert_post", arguments: { ...base, date } });
+      await client?.close();
+      client = undefined;
+      return { res, writes: mutatingCalls(fake).length };
+    };
+
+    // Same UTC day keeps published_at; an exact timestamp must match to the millisecond.
+    for (const date of ["2026-10-01", "2026-10-01T09:15:00Z", "2026-10-01T11:15:00+02:00", "2026-10-01T09:15:00"]) {
+      const { res, writes } = await run(published, date);
+      expect(res.structuredContent, date).toMatchObject({ action: "unchanged" });
+      expect(writes, date).toBe(0);
+    }
+    for (const date of ["2026-09-30", "2026-10-01T09:16:00Z"]) {
+      const { res, writes } = await run(published, date);
+      expect(text(res), date).toMatch(/confirm_live_update: true/);
+      expect(writes, date).toBe(0);
+    }
+    // A draft holds the date in date_override, compared as an instant.
+    for (const date of ["2026-09-01", "2026-09-01T00:00:00Z", "2026-09-01T02:00:00+02:00"]) {
+      expect((await run(draftHeld, date)).writes, date).toBe(0);
+    }
+    expect((await run(draftHeld, "2026-09-01T00:00:01Z")).writes).toBe(1);
+  });
+});
+
+describe("postMatchesPayload", () => {
+  const payload = (overrides: Partial<UpsertPostPayload> = {}): UpsertPostPayload => ({
+    project_id: 7,
+    title: "Hello",
+    slug: "hello",
+    body_markdown: "Body",
+    description: null,
+    web_visibility: "listed",
+    hero_image: null,
+    form_id: null,
+    subject: null,
+    preheader: null,
+    ...overrides,
+  });
+
+  it("matches a row saved from the same fields and ignores send bookkeeping", () => {
+    expect(postMatchesPayload(post(), payload())).toBe(true);
+    expect(postMatchesPayload(post({ status: "sent", sent_count: 9, recipient_count: 9, published_at: "2026-10-01T00:00:00Z" }), payload())).toBe(true);
+  });
+
+  it("does not compare the date when the payload has none", () => {
+    expect(postMatchesPayload(post({ date_override: "2026-09-01T00:00:00Z" }), payload())).toBe(true);
+  });
+
+  it("counts an unparseable stored date or a stored null as changed when a date is given", () => {
+    expect(postMatchesPayload(post({ published_at: "garbage" }), payload({ date: "2026-10-01" }))).toBe(false);
+    expect(postMatchesPayload(post({ date_override: null }), payload({ date: "2026-10-01" }))).toBe(false);
   });
 });
 

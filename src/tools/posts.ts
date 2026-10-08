@@ -10,6 +10,7 @@ import {
   getPostBySlug,
   listPosts,
   postContentFingerprint,
+  postMatchesPayload,
   postNotFound,
   postWillEmail,
   publishPost,
@@ -292,8 +293,10 @@ export const UpsertPostOutput = z.object({
   project: ProjectBrief,
   post_id: z.string(),
   slug: z.string(),
-  action: z.enum(["created", "updated"]),
-  published: z.boolean().describe("True when the post was already live, so this save changed the live page."),
+  action: z
+    .enum(["created", "updated", "unchanged"])
+    .describe("unchanged: every field already matched the saved post, so nothing was written and no rebuild was queued."),
+  published: z.boolean().describe("True when the post is live, so a save (other than an unchanged one) changed the live page."),
   rebuild_queued: z.boolean().describe("True when the save queued a site rebuild (only for published posts)."),
   build_id: BuildIdOutput,
   after_event_id: AfterEventIdOutput,
@@ -321,15 +324,6 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
 
   const project = await resolveProject(ctx, args.project);
   const existing = await getPostBySlug(ctx.http, project.id, slug);
-  if (existing?.published_at && args.confirm_live_update !== true) {
-    throw new MicropageError(
-      "CONFIRM_REQUIRED",
-      `The post "${slug}" is published (since ${existing.published_at}), so saving changes the live page immediately and ` +
-        "rebuilds the site. Ask the user to approve the live update, then call upsert_post again with confirm_live_update: true. " +
-        "Nothing was saved.",
-    );
-  }
-
   const formId = email ? await resolveListFormId(ctx.http, project.id, args.list!) : null;
   const heroUrl = await resolveHeroUrl(ctx.http, project.id, args.hero);
 
@@ -346,11 +340,6 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
     preheader: args.preview || null,
     ...(args.date ? { date: args.date } : {}),
   };
-  const cursor = existing?.published_at ? await projectCursor(ctx, project) : null;
-  const res = await upsertPost(ctx.http, payload);
-  // An older upsert-post rebuilds active_build_id for every published save; a
-  // newer one reports the live build it rebuilt.
-  const rebuild = rebuildOutcome(res, project, res.published, cursor);
 
   const warnings: string[] = [];
   const unhosted = unhostedBodyImages(args.body_markdown);
@@ -360,6 +349,46 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
         "Upload them with upload_asset, swap in the URLs from get_file_url and save again.",
     );
   }
+
+  // A save that changes nothing still rebuilds a published post's site, so it
+  // is skipped; with no write there is nothing live to confirm.
+  if (existing && postMatchesPayload(existing, payload)) {
+    const published = existing.published_at !== null;
+    warnings.push(
+      `Nothing changed: the post already has these values, so nothing was saved${published ? " and the site was not rebuilt" : ""}.`,
+    );
+    if (!published) warnings.push("The post is a draft: not on the site and not emailed. preview_post_send then publish_post makes it live.");
+    return {
+      project: projectBrief(project),
+      post_id: existing.id,
+      slug,
+      action: "unchanged",
+      published,
+      rebuild_queued: false,
+      build_id: null,
+      after_event_id: null,
+      email,
+      list: email ? args.list!.trim() : null,
+      hero: heroUrl,
+      warnings,
+    };
+  }
+
+  if (existing?.published_at && args.confirm_live_update !== true) {
+    throw new MicropageError(
+      "CONFIRM_REQUIRED",
+      `The post "${slug}" is published (since ${existing.published_at}), so saving changes the live page immediately and ` +
+        "rebuilds the site. Ask the user to approve the live update, then call upsert_post again with confirm_live_update: true. " +
+        "Nothing was saved.",
+    );
+  }
+
+  const cursor = existing?.published_at ? await projectCursor(ctx, project) : null;
+  const res = await upsertPost(ctx.http, payload);
+  // An older upsert-post rebuilds active_build_id for every published save; a
+  // newer one reports the live build it rebuilt.
+  const rebuild = rebuildOutcome(res, project, res.published, cursor);
+
   if (!res.published) warnings.push("Saved as a draft: not on the site and not emailed. preview_post_send then publish_post makes it live.");
 
   return {
@@ -689,7 +718,7 @@ Call it with a slug before editing a post: upsert_post replaces every field, so 
 
 Every call replaces the whole post: an omitted optional field (description, hero, subject, preview, email/list) is cleared. The exception is \`date\` (the post's public date, past or today): omitted, the post keeps its current date. To edit, read the post with list_posts(slug) first and pass everything back.
 
-Saving never sends email and never publishes a draft. But if the post is already published, the save changes the live page at once and rebuilds the site, so it needs confirm_live_update: true after the user agrees. ${REBUILD_NOTE}
+Saving never sends email and never publishes a draft. But if the post is already published, the save changes the live page at once and rebuilds the site, so it needs confirm_live_update: true after the user agrees. ${REBUILD_NOTE} When every field already matches the saved post (a date that keeps the current one counts as matching), nothing is written, no rebuild is queued, no confirmation is needed, and action is "unchanged".
 
 Images are not uploaded here. For the hero pass an https URL or the filename of an asset uploaded with upload_asset; inside body_markdown use hosted URLs only (upload_asset, then get_file_url). To publish afterwards use preview_post_send, then publish_post.`,
       inputSchema: UpsertPostInput,
@@ -698,7 +727,12 @@ Images are not uploaded here. For the hero pass an https URL or the filename of 
     },
     async (args) => {
       const result = await runUpsertPost(ctx, args);
-      const state = result.published ? "live page updated, site rebuild queued" : "draft";
+      const state =
+        result.action === "unchanged"
+          ? "nothing saved"
+          : result.published
+            ? "live page updated, site rebuild queued"
+            : "draft";
       return structuredResult(result, `Post "${result.slug}" ${result.action} (${state}).`);
     },
   );

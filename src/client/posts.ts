@@ -22,7 +22,7 @@ export const POST_LIST_COLUMNS =
 /** Everything posts pull reads, plus the email fields upsert_post writes. */
 export const POST_FULL_COLUMNS =
   "id,slug,title,description,body_markdown,web_visibility,email_enabled,form_id,hero_image,subject,preheader," +
-  "status,published_at,created_at,recipient_count,sent_count";
+  "status,published_at,created_at,recipient_count,sent_count,date_override";
 
 export interface PostListRow {
   id: string;
@@ -44,6 +44,8 @@ export interface PostRow extends PostListRow {
   subject: string | null;
   preheader: string | null;
   sent_count: number | null;
+  /** The author-set public date; on a draft it is held until the first publish. */
+  date_override?: string | null;
 }
 
 export async function listPosts(http: Http, projectId: number): Promise<PostListRow[]> {
@@ -208,6 +210,98 @@ export function postContentFingerprint(post: PostRow): string {
     post.web_visibility,
   ];
   return createHash("sha256").update(JSON.stringify(fields)).digest("base64url");
+}
+
+// ---------------------------------------------------------------------------
+// Unchanged detection
+// ---------------------------------------------------------------------------
+
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DATE_TIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
+
+/**
+ * The instant upsert-post stores for a `date` (supabase/functions/_shared/post-date.ts
+ * parsePostDate, minus the future check the server still makes): no offset means
+ * UTC, fractions are cut to milliseconds. null when it would not parse there.
+ */
+function parsePostDateValue(input: string): { value: Date; dateOnly: boolean } | null {
+  const s = input.trim();
+  const day = DATE_ONLY_RE.exec(s);
+  if (day) {
+    const value = new Date(Date.UTC(Number(day[1]), Number(day[2]) - 1, Number(day[3])));
+    return Number.isNaN(value.getTime()) ? null : { value, dateOnly: true };
+  }
+  const dt = DATE_TIME_RE.exec(s);
+  if (!dt) return null;
+  let offset = "Z";
+  if (dt[8] && dt[8] !== "Z" && dt[8] !== "z") {
+    const m = /^([+-])(\d{2}):?(\d{2})?$/.exec(dt[8]);
+    if (!m) return null;
+    offset = `${m[1]}${m[2]}:${m[3] ?? "00"}`;
+  }
+  const sec = (dt[6] ?? "00").padStart(2, "0");
+  const millis = (dt[7] ?? "").padEnd(3, "0").slice(0, 3);
+  const value = new Date(`${dt[1]}-${dt[2]}-${dt[3]}T${dt[4]}:${dt[5]}:${sec}.${millis}${offset}`);
+  return Number.isNaN(value.getTime()) ? null : { value, dateOnly: false };
+}
+
+function sameInstant(a: Date, b: string | null | undefined): boolean {
+  if (b == null || b === "") return false;
+  const t = new Date(b).getTime();
+  return !Number.isNaN(t) && a.getTime() === t;
+}
+
+/**
+ * Whether upsert-post would leave the stored date as it is. A published post
+ * keeps published_at when the date is the same UTC day (date-only) or the same
+ * instant (isDateNoop); a draft stores the date in date_override, so it is
+ * compared with that.
+ */
+function dateIsNoop(date: string, row: Pick<PostRow, "published_at" | "date_override">): boolean {
+  const parsed = parsePostDateValue(date);
+  if (!parsed) return false;
+  if (row.published_at != null && row.published_at !== "") {
+    const current = new Date(row.published_at);
+    if (Number.isNaN(current.getTime())) return false;
+    if (parsed.dateOnly) return parsed.value.toISOString().slice(0, 10) === current.toISOString().slice(0, 10);
+    return parsed.value.getTime() === current.getTime();
+  }
+  return sameInstant(parsed.value, row.date_override);
+}
+
+const emptyToNull = (v: string | null | undefined): string | null => (v == null || v === "" ? null : v);
+// As upsert-post's normalizeContent: line endings, trailing whitespace and
+// leading blank lines differ between editors without changing what readers see.
+const normaliseBody = (v: string | null | undefined): string | null => {
+  if (v == null) return null;
+  const s = v.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+  return s === "" ? null : s;
+};
+
+/**
+ * True when saving `payload` would not change `row`, so the save (and the site
+ * rebuild upsert-post queues for any save of a published post) can be skipped.
+ * The CLI makes the same comparison before `posts push` writes (cli/src/posts-sync.js);
+ * keep the two in step. Normalised as upsert-post stores fields: empty optional
+ * strings are null, an empty subject is the title. email_enabled is derived
+ * from form_id on save, so a row where they disagree counts as changed.
+ */
+export function postMatchesPayload(row: PostRow, payload: UpsertPostPayload): boolean {
+  const title = payload.title.trim();
+  const rowTitle = (row.title ?? "").trim();
+  const same =
+    rowTitle === title &&
+    normaliseBody(row.body_markdown) === normaliseBody(payload.body_markdown) &&
+    emptyToNull(row.description) === emptyToNull(payload.description) &&
+    emptyToNull(row.hero_image) === emptyToNull(payload.hero_image) &&
+    emptyToNull(row.preheader) === emptyToNull(payload.preheader) &&
+    emptyToNull(row.form_id) === emptyToNull(payload.form_id) &&
+    (row.email_enabled === true) === (emptyToNull(payload.form_id) !== null) &&
+    row.web_visibility === payload.web_visibility &&
+    (emptyToNull(row.subject) ?? rowTitle) === (emptyToNull(payload.subject) ?? title);
+  if (!same) return false;
+  return payload.date === undefined || dateIsNoop(payload.date, row);
 }
 
 // ---------------------------------------------------------------------------

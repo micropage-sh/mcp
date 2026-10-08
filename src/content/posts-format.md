@@ -36,9 +36,10 @@ A companion image file next to the post (`posts/launch.md` + `posts/launch.png`)
 | `slug` | Optional. Defaults to the filename minus a leading `YYYY-MM-DD-` date prefix. Unique per project. |
 | `date` | Optional. The post's public date: `YYYY-MM-DD` (midnight UTC) or an ISO 8601 timestamp (no offset means UTC). Past or today only; scheduling isn't supported. Sets the published date of a live post; a draft holds it until first publish. Omitted, the post keeps its current date. |
 | `description` | Web summary — shown in the `/content` archive, meta description, and og tags. |
-| `visibility` | `listed` (default, appears in the site's `/content` index) or `unlisted` (has a page but isn't listed). |
+| `visibility` | `listed` (default, appears in the site's `/content` index), `unlisted` (has a page but isn't listed), or `none` (email only, no web page). |
 | `hero` | Optional. A companion image file named like the post (e.g. `hello.jpg` next to `hello.md`), an asset filename, or an absolute URL. |
-| `list` | A newsletter form name — the send target. Required to email the post on publish. |
+| `email` | Set to `true` to email the post on publish. Requires `list`. |
+| `list` | A newsletter form name — the send target. |
 | `subject` | Email subject. Defaults to the title. |
 | `preview` | Email preheader / inbox preview text. |
 
@@ -52,4 +53,4 @@ Once a post is published, editing its content and saving goes **live immediately
 
 **Unpublishing** takes the page down (it 404s) and returns the post to draft. The post itself isn't deleted, and you can publish it again later.
 
-**Re-publishing** an already-published post re-sends the email to the list, and re-snapshots the recipient list — which resets that post's click-through stats.
+**Re-publishing** an already-published post re-sends the email to the list, and re-snapshots the recipient list — which resets that post's click-through stats. The CLI guards against this: `micropage posts publish` without a slug publishes drafts only, and re-publishing an email post that was already sent, even if unpublished since, requires `--resend` ([Posts (CLI)](/docs/cli/posts#publish)).
