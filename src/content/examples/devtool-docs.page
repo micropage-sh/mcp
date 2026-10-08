@@ -45,10 +45,7 @@ h1: Stream events without the boilerplate.
 p: Fluxline is a lightweight SDK for publishing, subscribing to, and replaying ordered event streams. Works with your existing message broker — no new infrastructure required.
 
 ////
-  html: <pre><code>import { Fluxline } from 'fluxline'
-
-const client = new Fluxline({ brokerUrl: process.env.BROKER_URL })
-await client.publish('orders', { id: 'ord_01', total: 49.00 })</code></pre>
+html: <pre><code>import { Fluxline } from 'fluxline'&#10;&#10;const client = new Fluxline({ brokerUrl: process.env.BROKER_URL })&#10;await client.publish('orders', { id: 'ord_01', total: 49.00 })</code></pre>
 
 col:
   button: Get started -> /docs
@@ -100,11 +97,7 @@ h1: Getting started
 h2: Installation
 
 ////
-  html: <pre><code># TypeScript / Node
-npm install fluxline
-
-# Go
-go get github.com/fluxline/fluxline-go</code></pre>
+html: <pre><code># TypeScript / Node&#10;npm install fluxline&#10;&#10;# Go&#10;go get github.com/fluxline/fluxline-go</code></pre>
 
 /// section
 h2: Quick start
