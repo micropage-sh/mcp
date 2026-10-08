@@ -54,6 +54,7 @@ function post(overrides: Partial<PostRow> = {}): PostRow {
     recipient_count: 0,
     sent_count: 0,
     started_at: null,
+    revision: 3,
     ...overrides,
   };
 }
@@ -236,7 +237,7 @@ describe("list_posts", () => {
     const c = await connect(serve(b));
     const res = await c.callTool({ name: "list_posts", arguments: { project: "acme", slug: "Hello" } });
     expect(res.structuredContent).toMatchObject({
-      post: { slug: "hello", title: "Hello", body_markdown: "Body", description: "D", hero: "https://x/h.png", preview: "P", visibility: "listed" },
+      post: { slug: "hello", title: "Hello", body_markdown: "Body", description: "D", hero: "https://x/h.png", preview: "P", visibility: "listed", revision: 3 },
     });
   });
 });
@@ -274,6 +275,7 @@ describe("upsert_post", () => {
       form_id: FORM_ID,
       subject: null,
       preheader: "See it",
+      expected_revision: 0,
     });
     expect(new URL(callsTo(fake, "list-files")[0]!.url).searchParams.get("project_id")).toBe("7");
     expect(res.structuredContent).toMatchObject({ action: "created", published: false, email: true, list: "newsletter", warnings: [expect.stringMatching(/draft/)] });
@@ -372,6 +374,116 @@ describe("upsert_post", () => {
     const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b", date: "2099-01-01" } });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/date is in the future; scheduling posts is not supported/);
+  });
+});
+
+describe("upsert_post revision check", () => {
+  const edit = { project: "acme", title: "Hello", body_markdown: "New body" };
+  const updated = () => ({ body: { post_id: "post-1", action: "updated", published: false, revision: 4 } });
+
+  it("asks list_posts for the revision", async () => {
+    const fake = serve(backend({ posts: [post()] }));
+    const c = await connect(fake);
+    await c.callTool({ name: "list_posts", arguments: { project: "acme", slug: "hello" } });
+    const read = fake.calls.find((call) => new URL(call.url).pathname === "/rest/v1/posts")!;
+    expect(new URL(read.url).searchParams.get("select")).toMatch(/(^|,)revision(,|$)/);
+  });
+
+  it("sends the caller's revision and reports the new one", async () => {
+    const fake = serve(backend({ posts: [post()], upsert: updated }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { ...edit, revision: 3 } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(callsTo(fake, "upsert-post")[0]!.body).toMatchObject({ expected_revision: 3 });
+    expect(res.structuredContent).toMatchObject({ action: "updated", revision: 4 });
+  });
+
+  it("refuses a stale revision before the live-update confirmation, writing nothing", async () => {
+    const fake = serve(backend({ posts: [post({ revision: 5, published_at: "2026-10-01T00:00:00Z" })], upsert: updated }));
+    const c = await connect(fake);
+    for (const extra of [{}, { confirm_live_update: true }]) {
+      const res = await c.callTool({ name: "upsert_post", arguments: { ...edit, revision: 3, ...extra } });
+      expect(res.isError).toBe(true);
+      expect(text(res)).toMatch(/changed since you read it \(now revision 5\)[\s\S]*Nothing was saved[\s\S]*list_posts/);
+      expect(text(res)).not.toMatch(/confirm_live_update/);
+    }
+    expect(mutatingCalls(fake)).toHaveLength(0);
+    expect(fake.calls.filter((call) => new URL(call.url).pathname === "/rest/v1/build_deploy_events")).toHaveLength(0);
+  });
+
+  it("refuses revision 0 for an existing post and a revision for a missing one", async () => {
+    const fake = serve(backend({ posts: [post()] }));
+    const c = await connect(fake);
+    const exists = await c.callTool({ name: "upsert_post", arguments: { ...edit, revision: 0 } });
+    expect(exists.isError).toBe(true);
+    expect(text(exists)).toMatch(/now revision 3/);
+    const gone = await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "other", revision: 2 } });
+    expect(gone.isError).toBe(true);
+    expect(text(gone)).toMatch(/\\"other\\" changed since you read it \(it no longer exists/);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("defaults to the revision just read, and to 0 when creating", async () => {
+    const fake = serve(backend({ posts: [post({ revision: 7 })], upsert: updated }));
+    const c = await connect(fake);
+    await c.callTool({ name: "upsert_post", arguments: edit });
+    await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "fresh", revision: 0 } });
+    await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "fresh-2" } });
+    expect(callsTo(fake, "upsert-post").map((call) => (call.body as { expected_revision?: number }).expected_revision)).toEqual([7, 0, 0]);
+  });
+
+  it("reports an unchanged save as unchanged even with a stale revision", async () => {
+    const fake = serve(backend({ posts: [post({ revision: 9 })] }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "Hello", body_markdown: "Body", revision: 2 } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ action: "unchanged", revision: 9 });
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("maps the server's REVISION_CONFLICT apart from slug clashes", async () => {
+    const conflict = backend({
+      posts: [post()],
+      upsert: () => ({
+        status: 409,
+        body: { error: "This post changed since it was read. Nothing was saved.", code: "REVISION_CONFLICT", post_id: "post-1", current_revision: 6 },
+      }),
+    });
+    let c = await connect(serve(conflict));
+    const res = await c.callTool({ name: "upsert_post", arguments: { ...edit, revision: 3 } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/changed since you read it \(now revision 6\)/);
+    expect(text(res)).not.toMatch(/already used by another post/);
+    await client?.close();
+
+    const gone = backend({ upsert: () => ({ status: 409, body: { code: "REVISION_CONFLICT", current_revision: null } }) });
+    c = await connect(serve(gone));
+    const missing = await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "new-one" } });
+    expect(text(missing)).toMatch(/it no longer exists under that slug/);
+    await client?.close();
+
+    const taken = backend({ upsert: () => ({ status: 409, body: { error: "A post with this slug already exists", code: "SLUG_TAKEN" } }) });
+    c = await connect(serve(taken));
+    const clash = await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "taken" } });
+    expect(text(clash)).toMatch(/slug \\"taken\\" is already used by another post/);
+    await client?.close();
+
+    const other = backend({ upsert: () => ({ status: 409, body: { error: "Something else", code: "OTHER" } }) });
+    c = await connect(serve(other));
+    const unknown = await c.callTool({ name: "upsert_post", arguments: { ...edit, slug: "x" } });
+    expect(unknown.isError).toBe(true);
+    expect(text(unknown)).toMatch(/Something else/);
+    expect(text(unknown)).not.toMatch(/already used by another post|changed since you read it/);
+  });
+
+  it("rejects a negative or fractional revision before any network call", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    for (const revision of [-1, 1.5]) {
+      const res = await c.callTool({ name: "upsert_post", arguments: { ...edit, revision } });
+      expect(res.isError, String(revision)).toBe(true);
+    }
+    expect(fake.calls).toHaveLength(0);
   });
 });
 

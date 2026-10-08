@@ -17,6 +17,7 @@ import {
   publishPost,
   resolveHeroUrl,
   resolveListFormId,
+  revisionConflict,
   slugify,
   unhostedBodyImages,
   unpublishPost,
@@ -139,6 +140,10 @@ const PostDetail = PostSummary.extend({
   subject: z.string().nullable().describe("Email subject (defaults to the title)."),
   preview: z.string().nullable().describe("Email preheader / inbox preview text."),
   sent_count: z.number().nullable(),
+  revision: z
+    .number()
+    .nullable()
+    .describe("Changes whenever the post's content is saved. Pass it to upsert_post as `revision` when editing this post."),
 });
 type PostDetail = z.infer<typeof PostDetail>;
 
@@ -193,6 +198,7 @@ export async function runListPosts(ctx: ToolContext, args: z.infer<typeof ListPo
     subject: row.subject,
     preview: row.preheader,
     sent_count: row.sent_count,
+    revision: typeof row.revision === "number" ? row.revision : null,
   };
   return { project: projectBrief(project), post };
 }
@@ -280,6 +286,15 @@ export const UpsertPostInput = z
         "Sets the published date; past or today only (scheduling is not supported). On a draft it is held until " +
         "the first publish. Unlike the other optional fields, omitting it leaves the post's date unchanged.",
     ),
+    revision: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "The revision from list_posts; pass it when editing an existing post so a change made since your read is not " +
+          "overwritten. 0 means the post must not exist yet. Omitted, the post's revision at save time is used.",
+      ),
     confirm_live_update: z
       .boolean()
       .optional()
@@ -304,6 +319,7 @@ export const UpsertPostOutput = z.object({
   email: z.boolean(),
   list: z.string().nullable(),
   hero: z.string().nullable(),
+  revision: z.number().nullable().describe("The post's revision after this call; pass it as `revision` on the next edit."),
   warnings: z.array(z.string()),
 });
 export type UpsertPostResult = z.infer<typeof UpsertPostOutput>;
@@ -371,9 +387,23 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
       email,
       list: email ? args.list!.trim() : null,
       hero: heroUrl,
+      revision: typeof existing.revision === "number" ? existing.revision : null,
       warnings,
     };
   }
+
+  // Refused before the live-update confirmation: approving a save that would
+  // overwrite someone else's change is not what the user agreed to.
+  if (args.revision !== undefined) {
+    const current = existing ? existing.revision : null;
+    const stale = existing ? typeof current === "number" && current !== args.revision : args.revision > 0;
+    if (stale) throw revisionConflict(slug, typeof current === "number" ? current : null);
+  }
+  // Without a revision from the caller, the read above is the base: that still
+  // stops a change landing between it and the write, and a create from
+  // replacing a post made in the meantime.
+  const expected = args.revision !== undefined ? args.revision : existing ? existing.revision : 0;
+  if (typeof expected === "number") payload.expected_revision = expected;
 
   if (existing?.published_at && args.confirm_live_update !== true) {
     throw new MicropageError(
@@ -404,6 +434,7 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
     email,
     list: email ? args.list!.trim() : null,
     hero: heroUrl,
+    revision: typeof res.revision === "number" ? res.revision : null,
     warnings,
   };
 }
@@ -716,7 +747,7 @@ export function registerPostTools(server: McpServer, ctx: ToolContext): void {
 
 Without \`slug\`: every post, newest first, with slug, title, visibility, whether it is published and when, whether publishing emails it, and the newsletter list name. With \`slug\`: that post in full, including body_markdown and every field under the same names upsert_post takes (title, description, visibility, hero, email, list, subject, preview).
 
-Call it with a slug before editing a post: upsert_post replaces every field, so start from the current values. It does not say who will receive an email; preview_post_send does that. Read-only.`,
+Call it with a slug before editing a post: upsert_post replaces every field, so start from the current values, and pass the post's revision back to upsert_post. It does not say who will receive an email; preview_post_send does that. Read-only.`,
       inputSchema: ListPostsInput,
       outputSchema: ListPostsOutput,
       annotations: RO,
@@ -736,7 +767,7 @@ Call it with a slug before editing a post: upsert_post replaces every field, so 
       title: "Create or update a micropage post",
       description: `Create or update one post (a blog post under /content and/or a newsletter email), keyed by slug: an existing slug is updated, a new one is created as a draft. Same as \`micropage posts push\` for one file; the arguments are the post front-matter fields plus body_markdown (see the micropage://posts/format resource).
 
-Every call replaces the whole post: an omitted optional field (description, hero, subject, preview, email/list) is cleared. The exception is \`date\` (the post's public date, past or today): omitted, the post keeps its current date. To edit, read the post with list_posts(slug) first and pass everything back.
+Every call replaces the whole post: an omitted optional field (description, hero, subject, preview, email/list) is cleared. The exception is \`date\` (the post's public date, past or today): omitted, the post keeps its current date. To edit, read the post with list_posts(slug) first and pass everything back, with its \`revision\`: if the post changed since that read (in the editor, the CLI or another session), the save is refused with REVISION_CONFLICT and nothing is written; re-read it, merge, and save again.
 
 Saving never sends email and never publishes a draft. But if the post is already published, the save changes the live page at once and rebuilds the site, so it needs confirm_live_update: true after the user agrees. ${REBUILD_NOTE} When every field already matches the saved post (a date that keeps the current one counts as matching), nothing is written, no rebuild is queued, no confirmation is needed, and action is "unchanged".
 

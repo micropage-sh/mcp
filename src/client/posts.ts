@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { STDIO_HINTS, type ModeHints } from "../hints.js";
-import { MicropageError } from "./errors.js";
+import { MicropageError, type MicropageErrorOptions } from "./errors.js";
 import { eq, gt, inList, is, type Http } from "./http.js";
 
 /** Same rule as supabase/functions/_shared/slug.ts and the CLI's slugify. */
@@ -22,7 +22,7 @@ export const POST_LIST_COLUMNS =
 /** Everything posts pull reads, plus the email fields upsert_post writes. */
 export const POST_FULL_COLUMNS =
   "id,slug,title,description,body_markdown,web_visibility,email_enabled,form_id,hero_image,subject,preheader," +
-  "status,published_at,created_at,recipient_count,sent_count,started_at,date_override";
+  "status,published_at,created_at,recipient_count,sent_count,started_at,date_override,revision";
 
 export interface PostListRow {
   id: string;
@@ -47,6 +47,8 @@ export interface PostRow extends PostListRow {
   started_at: string | null;
   /** The author-set public date; on a draft it is held until the first publish. */
   date_override?: string | null;
+  /** Bumped by the database on every content change, not on send bookkeeping. */
+  revision?: number;
 }
 
 export async function listPosts(http: Http, projectId: number): Promise<PostListRow[]> {
@@ -62,6 +64,21 @@ export async function getPostBySlug(http: Http, projectId: number, slug: string)
     select: POST_FULL_COLUMNS,
     filters: { project_id: eq(projectId), slug: eq(slug) },
   });
+}
+
+/**
+ * The post moved on since the caller read it, so a save would overwrite
+ * someone else's change. `current` is null when the post is gone (or was
+ * renamed) since the read.
+ */
+export function revisionConflict(slug: string, current: number | null, options: MicropageErrorOptions = {}): MicropageError {
+  const now = current === null ? "it no longer exists under that slug" : `now revision ${current}`;
+  return new MicropageError(
+    "REVISION_CONFLICT",
+    `The post "${slug}" changed since you read it (${now}). Nothing was saved. Call list_posts with slug "${slug}" to ` +
+      "re-read it, merge your edits into the current values, and call upsert_post again with the new revision.",
+    options,
+  );
 }
 
 export function postNotFound(slug: string): MicropageError {
@@ -340,6 +357,12 @@ export interface UpsertPostPayload {
   preheader: string | null;
   /** Public date (YYYY-MM-DD or ISO 8601). Omitted leaves the stored date unchanged. */
   date?: string;
+  /**
+   * The revision the save is based on; upsert-post refuses with 409
+   * REVISION_CONFLICT when the post is no longer at it. 0 means create only.
+   * Omitted skips the check.
+   */
+  expected_revision?: number;
 }
 
 /**
@@ -355,6 +378,8 @@ export interface UpsertPostResponse extends RebuildField {
   post_id: string;
   action: "created" | "updated";
   published: boolean;
+  /** The post's revision after the save; absent from servers older than the column. */
+  revision?: number;
 }
 
 export async function upsertPost(http: Http, payload: UpsertPostPayload): Promise<UpsertPostResponse> {
@@ -362,6 +387,14 @@ export async function upsertPost(http: Http, payload: UpsertPostPayload): Promis
     return await http.invoke<UpsertPostResponse>("upsert-post", payload);
   } catch (err) {
     if (err instanceof MicropageError && err.status === 409) {
+      const body = (err.data && typeof err.data === "object" ? err.data : {}) as { code?: unknown; current_revision?: unknown };
+      const code = body.code;
+      if (code === "REVISION_CONFLICT") {
+        const current = typeof body.current_revision === "number" ? body.current_revision : null;
+        throw revisionConflict(payload.slug, current, { status: 409, data: err.data, cause: err });
+      }
+      // Older servers send the slug clash without a code.
+      if (code != null && code !== "SLUG_TAKEN") throw err;
       throw new MicropageError(
         "SLUG_CONFLICT",
         `The slug "${payload.slug}" is already used by another post in this project. Pass a different \`slug\`, ` +
