@@ -37,7 +37,11 @@ Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, c
 Nav entries: `Label -> /path` or `btn: Label -> url` / `btn-outline: Label -> url`
 
 Page header: `[Name -> /path]`
-Optional page meta: `meta:` then description, og_type, canonical, keywords
+Optional page meta: `meta:` then indented description, og_type, canonical, keywords, and:
+- `lang: ro` (or `pt-BR`) — this page's `<html lang>`; default is the site `lang`, else `en`
+- `translation: en -> /about` — repeatable; links a translated version (made reciprocal automatically, emitted as `hreflang`; links to missing pages are ignored)
+
+Languages: put each language in a folder (`[Acasă -> /ro]`, `[Despre -> /ro/despre]`). A language folder sets the page language when its code is used in a `lang:` or `translation:` line, or the folder holds at least two pages (so `/it/services` alone stays in the site language). Nav, footer and /content are shared by all languages.
 
 Sections:
 - `/// hero` optional `align:center` `bg:primary|secondary|muted|success|info`
@@ -46,8 +50,10 @@ Sections:
 
 Elements:
 - `h1:` `h2:` `h3:` `h4:` `h5:`
-- `p:`
+- `p:` — the rest of the line is literal text
 - `small:`
+- `- item` (unordered) / `1. item` (ordered; starts at the first number) — one item per line, consecutive lines form one list; a blank line or switching `-`/`1.` starts a new list; no nesting, plain text; works in sections, columns, footer. Use `p:` for a paragraph starting with `- ` or `2024. `
+- `table: Caption` (optional) then `| A | B |` rows — first row is the header; `|---|` separator optional; plain-text cells; `\|` is a literal pipe
 - `icon: bi bi-name` (Bootstrap Icons)
 - `img: alt: text <- filename.png` or `img: <- filename.png`
 - `button: Label -> url`

@@ -53,7 +53,10 @@ Micropage is a line-oriented markup with a small, fixed set of tags — one elem
 
 - File shape: a `[site]` block (title, description, logo, favicon, lang, colors, theme_color, og_image), optional `[nav]` and `[footer]`, then one or more page blocks like `[Home -> /]` / `[About -> /about]`.
 - Sections inside a page: `/// hero`, `/// section`, and (rarely) `/// html`. Both `/// hero` and `/// section` take optional `align:center` and `bg:primary|secondary|muted|success|info`.
-- Elements (~30 legal tags): `h1:`–`h5:`, `p:`, `small:`, `icon: bi bi-name`, `img: <- filename`, `button:`, `btn-secondary:`, `btn-outline:`, `link:`, `col:`, and form tags `form:`, `input:` (trailing `*` = required), `text:`, `textarea:`, `select: Label [A, B]`, `checkboxes:`, `radios:`, `submit:`.
+- Elements (~30 legal tags): `h1:`–`h5:`, `p:` (rest of line is literal), `small:`, `icon: bi bi-name`, `img: <- filename`, `button:`, `btn-secondary:`, `btn-outline:`, `link:`, `col:`, and form tags `form:`, `input:` (trailing `*` = required), `text:`, `textarea:`, `select: Label [A, B]`, `checkboxes:`, `radios:`, `submit:`.
+- Lists: `- item` (unordered) or `1. item` (ordered), one item per line; a blank line or switching `-`/`1.` starts a new list; no nesting. Use `p:` for a paragraph that starts with `- ` or `2024. `.
+- Tables: optional `table: Caption`, then `| A | B |` rows; the first row is the header, the `|---|` separator is optional, `\|` is a literal pipe.
+- Languages: in a page's `meta:`, `lang: ro` sets the page language and `translation: en -> /about` (repeatable) links translated versions. Put each language in a folder (`[Acasă -> /ro]`); nav and footer are shared.
 - Images use the `<- filename` convention (e.g. `img: <- product-dashboard`); the file must be uploaded to the project. Don't hardcode random remote URLs unless asked.
 - Colors and typography come from the `[site]` block, not from inline styles.
 
