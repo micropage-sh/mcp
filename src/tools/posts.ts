@@ -12,6 +12,7 @@ import {
   postContentFingerprint,
   postMatchesPayload,
   postNotFound,
+  postWasEmailed,
   postWillEmail,
   publishPost,
   resolveHeroUrl,
@@ -414,15 +415,21 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
 interface SendFacts {
   willEmail: boolean;
   alreadyPublished: boolean;
+  alreadyEmailed: boolean;
+  /** Publishing emails a list that has already had (or been getting) this post. */
+  resend: boolean;
   tokenPayload: TokenPayload;
 }
 
 function sendFacts(project: Project, post: PostRow): SendFacts {
   const willEmail = postWillEmail(post);
   const alreadyPublished = post.published_at !== null;
+  const alreadyEmailed = postWasEmailed(post);
   return {
     willEmail,
     alreadyPublished,
+    alreadyEmailed,
+    resend: willEmail && (alreadyPublished || alreadyEmailed),
     tokenPayload: {
       purpose: "publish_post",
       project_id: project.id,
@@ -431,12 +438,14 @@ function sendFacts(project: Project, post: PostRow): SendFacts {
       email_enabled: post.email_enabled === true,
       form_id: post.form_id,
       already_published: alreadyPublished,
+      already_emailed: alreadyEmailed,
     },
   };
 }
 
 const RESEND_WARNING =
-  "This post is already published, so publishing again RE-SENDS the email to everyone on the list and resets its click-through stats.";
+  "This post is already published or was emailed before (an unpublished post keeps its send record), so publishing it " +
+  "RE-SENDS the email to everyone on the list and resets its click-through stats.";
 
 async function loadPost(ctx: ToolContext, project: Project, rawSlug: string): Promise<PostRow> {
   const slug = normaliseSlug(rawSlug);
@@ -465,7 +474,13 @@ export const PreviewPostSendOutput = z.object({
   list: z.string().nullable(),
   recipient_count: z.number().nullable().describe("Active subscribers on the list right now; 0 when nothing is emailed."),
   already_published: z.boolean(),
-  resend_warning: z.string().nullable(),
+  already_emailed: z
+    .boolean()
+    .describe("True when the post has been emailed before, even if it was unpublished since. Unpublishing does not recall or reset a send."),
+  resend_warning: z
+    .string()
+    .nullable()
+    .describe("Set when publishing would email a post that is already published or was emailed before: a RE-SEND to the whole list."),
   send_allowed: z.boolean().describe("MICROPAGE_MCP_ALLOW_SEND is set, so this server may email subscribers."),
   publish_allowed: z.boolean().describe("Whether publish_post will go ahead for this post on this server."),
   blocked_reason: z.string().nullable(),
@@ -501,7 +516,8 @@ export async function runPreviewPostSend(ctx: ToolContext, args: z.infer<typeof 
     list: post.form_id ? (lists.get(post.form_id) ?? null) : null,
     recipient_count: recipients,
     already_published: facts.alreadyPublished,
-    resend_warning: facts.willEmail && facts.alreadyPublished ? RESEND_WARNING : null,
+    already_emailed: facts.alreadyEmailed,
+    resend_warning: facts.resend ? RESEND_WARNING : null,
     send_allowed: ctx.permissions.allowSend,
     publish_allowed: !blocked,
     blocked_reason: blocked ? ctx.hints.sendDisabled : null,
@@ -569,7 +585,11 @@ export async function runPublishPost(
       key: "confirm_post_send",
       message:
         `Publish "${post.title ?? post.slug}" and email it to ${recipients} subscriber(s) on the "${listName}" list?` +
-        (facts.alreadyPublished ? " It was already published, so this RE-SENDS it." : ""),
+        (facts.alreadyPublished
+          ? " It was already published, so this RE-SENDS it."
+          : facts.resend
+            ? " It was emailed before and has since been unpublished, so this RE-SENDS it."
+            : ""),
     });
     if (outcome.status === "pending") return { kind: "input", result: outcome.result };
     if (outcome.status === "declined") {
@@ -743,7 +763,7 @@ Images are not uploaded here. For the hero pass an https URL or the filename of 
       title: "Preview publishing a post",
       description: `Show what publish_post would do for one post, and get the confirmation_token publish_post requires. Call it before every publish and show the user the result.
 
-Reports whether publishing emails the newsletter list, the list name, the number of active subscribers it would go to, whether the post is already published (publishing again re-sends the email to the whole list), and whether this server is allowed to send email (${ctx.hints.sendSwitchName}).
+Reports whether publishing emails the newsletter list, the list name, the number of active subscribers it would go to, whether publishing is a re-send (the post is already published, or was emailed before and has since been unpublished; either way publishing emails the whole list again), and whether this server is allowed to send email (${ctx.hints.sendSwitchName}).
 
 The token is tied to the post as it is now: any edit to the post (upsert_post) or to its list invalidates it, and it expires after 15 minutes or when the server restarts. Read-only: nothing is published or sent.`,
       inputSchema: PreviewPostSendInput,
@@ -753,7 +773,7 @@ The token is tied to the post as it is now: any edit to the post (upsert_post) o
     async (args) => {
       const result = await runPreviewPostSend(ctx, args);
       const what = result.will_email
-        ? `Publishing emails ${result.recipient_count ?? "?"} subscriber(s) on "${result.list ?? "?"}"${result.already_published ? " AGAIN (re-send)" : ""}.`
+        ? `Publishing emails ${result.recipient_count ?? "?"} subscriber(s) on "${result.list ?? "?"}"${result.resend_warning ? " AGAIN (re-send)" : ""}.`
         : "Publishing puts the post on the web only; no email.";
       return structuredResult(result, result.publish_allowed ? what : `${what} Blocked: ${result.blocked_reason}`);
     },
@@ -763,7 +783,7 @@ The token is tied to the post as it is now: any edit to the post (upsert_post) o
     "publish_post",
     {
       title: "Publish a micropage post (may send email)",
-      description: `Publish a post: put it live on the site under /content and, if it has email enabled with a list, email it to every active subscriber on that list. Re-publishing an already-published post re-sends the email to the whole list. Same as \`micropage posts publish <slug>\`.
+      description: `Publish a post: put it live on the site under /content and, if it has email enabled with a list, email it to every active subscriber on that list. Publishing a post that is already published, or that was emailed before and has since been unpublished, re-sends the email to the whole list. Same as \`micropage posts publish <slug>\`.
 
 Needs the confirmation_token from preview_post_send, taken after the post's last change; show the user that preview and get their go-ahead first. A stale or missing token is refused with nothing changed.
 

@@ -86,6 +86,7 @@ function post(overrides: Partial<PostRow> = {}): PostRow {
     created_at: "2026-10-01T00:00:00Z",
     recipient_count: 0,
     sent_count: 0,
+    started_at: null,
     ...overrides,
   };
 }

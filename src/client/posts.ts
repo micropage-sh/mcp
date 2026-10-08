@@ -22,7 +22,7 @@ export const POST_LIST_COLUMNS =
 /** Everything posts pull reads, plus the email fields upsert_post writes. */
 export const POST_FULL_COLUMNS =
   "id,slug,title,description,body_markdown,web_visibility,email_enabled,form_id,hero_image,subject,preheader," +
-  "status,published_at,created_at,recipient_count,sent_count,date_override";
+  "status,published_at,created_at,recipient_count,sent_count,started_at,date_override";
 
 export interface PostListRow {
   id: string;
@@ -44,6 +44,7 @@ export interface PostRow extends PostListRow {
   subject: string | null;
   preheader: string | null;
   sent_count: number | null;
+  started_at: string | null;
   /** The author-set public date; on a draft it is held until the first publish. */
   date_override?: string | null;
 }
@@ -73,6 +74,23 @@ export function postNotFound(slug: string): MicropageError {
 /** publish-post's condition for sending (supabase/functions/publish-post/index.ts). */
 export function postWillEmail(post: Pick<PostRow, "email_enabled" | "form_id">): boolean {
   return post.email_enabled === true && post.form_id != null;
+}
+
+/**
+ * True when the post has already been emailed, published or not: unpublish-post
+ * clears only published_at and leaves the send record behind. Same rule as
+ * wasEmailed in cli/src/commands/posts.js; keep the two in step.
+ */
+export function postWasEmailed(
+  post: Pick<PostRow, "sent_count" | "recipient_count" | "started_at" | "status">,
+): boolean {
+  return (
+    Number(post.sent_count) > 0 ||
+    Number(post.recipient_count) > 0 ||
+    post.started_at != null ||
+    post.status === "sending" ||
+    post.status === "sent"
+  );
 }
 
 // ---------------------------------------------------------------------------

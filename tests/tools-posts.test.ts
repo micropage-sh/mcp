@@ -53,6 +53,7 @@ function post(overrides: Partial<PostRow> = {}): PostRow {
     created_at: "2026-10-01T00:00:00Z",
     recipient_count: 0,
     sent_count: 0,
+    started_at: null,
     ...overrides,
   };
 }
@@ -564,6 +565,93 @@ describe("preview_post_send + publish_post", () => {
     const p = await preview(c);
     expect(p).toMatchObject({ already_published: true, resend_warning: expect.stringMatching(/RE-SENDS/), publish_allowed: true });
     expect(p).not.toHaveProperty("site_warning");
+  });
+
+  describe("a post emailed and then unpublished", () => {
+    // unpublish-post clears only published_at; the send record stays.
+    const emailedThenUnpublished = () =>
+      post({
+        email_enabled: true,
+        form_id: FORM_ID,
+        published_at: null,
+        status: "sent",
+        recipient_count: 5,
+        sent_count: 5,
+        started_at: "2026-10-01T00:00:00Z",
+      });
+
+    it("is flagged as a re-send by preview_post_send", async () => {
+      const c = await connect(serve(backend({ posts: [emailedThenUnpublished()], subscribers: 5 })), { MICROPAGE_MCP_ALLOW_SEND: "1" });
+      const p = await preview(c);
+      expect(p).toMatchObject({
+        will_email: true,
+        already_published: false,
+        already_emailed: true,
+        resend_warning: expect.stringMatching(/RE-SENDS/),
+      });
+      expect(p.resend_warning).toMatch(/emailed before/);
+    });
+
+    for (const [name, fields] of [
+      ["sent_count", { sent_count: 1 }],
+      ["recipient_count", { recipient_count: 1 }],
+      ["started_at", { started_at: "2026-10-01T00:00:00Z" }],
+      ["status sending", { status: "sending" }],
+      ["status sent", { status: "sent" }],
+    ] as const) {
+      it(`counts ${name} alone as already emailed`, async () => {
+        const c = await connect(serve(backend({ posts: [post({ email_enabled: true, form_id: FORM_ID, ...fields })] })), {
+          MICROPAGE_MCP_ALLOW_SEND: "1",
+        });
+        const p = await preview(c);
+        expect(p).toMatchObject({ already_emailed: true, resend_warning: expect.stringMatching(/RE-SENDS/) });
+      });
+    }
+
+    it("says RE-SENDS in the elicitation message", async () => {
+      const fake = serve(backend({ posts: [emailedThenUnpublished()], subscribers: 5 }));
+      const c = await connect(fake, { MICROPAGE_MCP_ALLOW_SEND: "1" }, { elicit: "accept" });
+      const { confirmation_token } = await preview(c);
+      const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(elicited).toEqual([expect.stringMatching(/emailed before and has since been unpublished, so this RE-SENDS it/)]);
+    });
+  });
+
+  it("refuses a token minted before the post was emailed, with zero publish calls", async () => {
+    const b = backend({ posts: [emailing()], subscribers: 5 });
+    const fake = serve(b);
+    const c = await connect(fake, { MICROPAGE_MCP_ALLOW_SEND: "1" });
+    const { confirmation_token } = await preview(c);
+    // Sent (by the CLI or the editor) and unpublished again after the preview.
+    Object.assign(b.posts[0]!, { status: "sent", recipient_count: 5, sent_count: 5, started_at: "2026-10-02T00:00:00Z" });
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/does not match the current state/);
+    expect(mutatingCalls(fake)).toHaveLength(0);
+  });
+
+  it("does not warn for a never-emailed draft, and the elicitation does not say RE-SENDS", async () => {
+    const fake = serve(backend({ posts: [emailing()], subscribers: 5 }));
+    const c = await connect(fake, { MICROPAGE_MCP_ALLOW_SEND: "1" }, { elicit: "accept" });
+    const p = await preview(c);
+    expect(p).toMatchObject({ will_email: true, already_published: false, already_emailed: false, resend_warning: null });
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token: p.confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(elicited).toHaveLength(1);
+    expect(elicited[0]).not.toMatch(/RE-SENDS/);
+  });
+
+  it("does not warn for a web-only post that was emailed before", async () => {
+    const b = backend({ posts: [post({ form_id: FORM_ID, status: "sent", recipient_count: 5, sent_count: 5, started_at: "2026-10-01T00:00:00Z" })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const p = await preview(c);
+    expect(p).toMatchObject({ will_email: false, already_emailed: true, resend_warning: null, publish_allowed: true });
+    const res = await c.callTool({ name: "publish_post", arguments: { project: "acme", slug: "hello", confirmation_token: p.confirmation_token } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ emailed: false });
+    expect(callsTo(fake, "publish-post")).toHaveLength(1);
   });
 
   it("publishes a web-only post with a fresh token and returns the deploy cursor", async () => {
