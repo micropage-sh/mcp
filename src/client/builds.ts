@@ -200,16 +200,14 @@ export async function saveDraft(
     llmsState = llms === null ? (active?.llms_txt ? "removed" : "none") : "set";
   }
 
-  const parsed = await parsePageSource(http, config, {
-    text: input.text,
-    projectId: input.projectId,
-    buildId: reuse ? active.id : null,
-  });
-  const json = injectLlmsTxt(parsed, llms);
-  const issues = collectParseIssues(json);
-  const page_count = countPages(json);
+  const compile = async (buildId: number) => {
+    const parsed = await parsePageSource(http, config, { text: input.text, projectId: input.projectId, buildId });
+    const json = injectLlmsTxt(parsed, llms);
+    return { json, issues: collectParseIssues(json), page_count: countPages(json) };
+  };
 
   if (reuse) {
+    const { json, issues, page_count } = await compile(active.id);
     const current = await getBuildById<{ id: number; status: string | null }>(http, input.projectId, active.id, "id,status");
     if (!current || !isEditable(current.status)) throw draftMoved(active.number, current?.status ?? "deleted");
 
@@ -230,24 +228,59 @@ export async function saveDraft(
     };
   }
 
+  // The row is created before parsing so the compiler stamps the build's own
+  // id into the pages; it only becomes active once it holds compiled content.
   const inserted = await http.insert<{ id: number; number: number | null; status: string | null }>("builds", {
     project_id: input.projectId,
     raw_content: input.text,
-    json_content: json,
     status: "draft",
     parser_version: "2",
   });
-  const row = inserted[0];
-  if (!row) throw new MicropageError("SAVE_FAILED", "Creating the draft build returned no row. Retry; if it persists, check list_builds.");
+  const created = inserted[0];
+  if (!created) throw new MicropageError("SAVE_FAILED", "Creating the draft build returned no row. Retry; if it persists, check list_builds.");
+
+  const { json, issues, page_count } = await compile(created.id).catch((err: unknown) => {
+    throw uncompiledDraft(err, created);
+  });
+
+  const rows = await http
+    .patch<{ id: number; number: number | null; status: string | null }>(
+      "builds",
+      { id: eq(created.id), project_id: eq(input.projectId), status: inList(EDITABLE_STATUSES) },
+      { json_content: json },
+    )
+    .catch((err: unknown) => {
+      throw uncompiledDraft(err, created);
+    });
+  const row = rows[0];
+  if (!row) throw draftMoved(created.number, "no longer a draft");
   await setActiveBuild(http, input.projectId, row.id);
   return {
-    build: { id: row.id, number: row.number ?? null, status: row.status ?? "draft" },
+    build: { id: row.id, number: row.number ?? created.number ?? null, status: row.status ?? created.status ?? "draft" },
     action: "created_draft",
     previous_active_build_id: input.activeBuildId,
     issues,
     page_count,
     llms_txt: llmsState,
   };
+}
+
+/**
+ * Failing to parse or store the compiled content after the new row exists
+ * leaves that row as an inactive, uncompiled draft. The active build is
+ * untouched, so the model is told the project is unchanged and a retry is
+ * safe, rather than "Nothing was saved".
+ */
+function uncompiledDraft(err: unknown, build: { id: number; number: number | null }): unknown {
+  if (!(err instanceof MicropageError)) return err;
+  let reason = err.message.replace(/\s*Nothing was saved\.$/, "");
+  if (!/[.!?]$/.test(reason)) reason += ".";
+  return new MicropageError(
+    err.code,
+    `${reason} Draft v${build.number ?? "?"} (id:${build.id}) had already been created; it holds no compiled pages and was not made active, ` +
+      "so the project's active build and live site are unchanged. Fix the problem and call save_page again; ignore that empty draft.",
+    { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
+  );
 }
 
 function draftMoved(number: number | null, status: string): MicropageError {

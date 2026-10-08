@@ -67,6 +67,8 @@ interface Backend {
   statusPolls: number;
   parse: (call: RecordedCall) => { status?: number; body: unknown };
   deleteStatus?: number;
+  /** HTTP status a PATCH of builds answers with instead of success. */
+  buildPatchStatus?: number;
   /** HTTP status publish-build answers with instead of success. */
   publishStatus?: number;
   /** Body publish-build answers with alongside publishStatus. */
@@ -161,8 +163,10 @@ function serve(b: Backend): FakeFetch {
         return { body: filterBuilds(b, q) };
       }
       case "PATCH /rest/v1/builds": {
+        if (b.buildPatchStatus) return { status: b.buildPatchStatus, body: { message: "upstream down" } };
         const rows = filterBuilds(b, q);
-        for (const r of rows) Object.assign(r, { raw_content: (call.body as { raw_content: string }).raw_content });
+        const body = call.body as { raw_content?: string };
+        if (body.raw_content !== undefined) for (const r of rows) r.raw_content = body.raw_content;
         return { body: rows };
       }
       case "POST /rest/v1/builds": {
@@ -371,26 +375,91 @@ describe("save_page", () => {
     const res = await c.callTool({ name: "save_page", arguments: { project: "acme", pages: [{ name: "landing.page", content: "[site]\ntitle: A" }] } });
     expect(res.isError, text(res)).toBeFalsy();
 
-    expect((callsTo(fake, "POST", "parse")[0]!.body as { build_id: unknown }).build_id).toBeNull();
     const insert = callsTo(fake, "POST", "/rest/v1/builds");
     expect(insert).toHaveLength(1);
     expect(insert[0]!.body).toEqual({
       project_id: 7,
       raw_content: "[site]\ntitle: A",
-      json_content: { site: { title: "New" }, pages: [{ meta: {}, body: [] }] },
       status: "draft",
       parser_version: "2",
     });
+    expect((callsTo(fake, "POST", "parse")[0]!.body as { build_id: unknown }).build_id).toBe(100);
+    const fill = callsTo(fake, "PATCH", "/rest/v1/builds");
+    expect(fill).toHaveLength(1);
+    const fq = new URL(fill[0]!.url).searchParams;
+    expect(fq.get("id")).toBe("eq.100");
+    expect(fq.get("status")).toBe("in.(draft,failed)");
+    expect(fill[0]!.body).toEqual({ json_content: { site: { title: "New" }, pages: [{ meta: {}, body: [] }] } });
     const setActive = callsTo(fake, "PATCH", "/rest/v1/projects");
     expect(setActive).toHaveLength(1);
     expect(new URL(setActive[0]!.url).searchParams.get("id")).toBe("eq.7");
     expect(setActive[0]!.body).toEqual({ active_build_id: 100 });
-    expect(callsTo(fake, "PATCH", "/rest/v1/builds")).toHaveLength(0);
     expect(res.structuredContent).toMatchObject({
       action: "created_draft",
       build: { id: 100, number: 5, status: "draft" },
       previous_active_build_id: 30,
     });
+  });
+
+  it("creates the new draft before parsing, and makes it active only after its compiled content is stored", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    const order = fake.calls.map((call) => `${call.method} ${path(call)}`);
+    const insert = order.indexOf("POST /rest/v1/builds");
+    const parse = order.indexOf("POST parse");
+    const fill = order.indexOf("PATCH /rest/v1/builds");
+    const setActive = order.indexOf("PATCH /rest/v1/projects");
+    expect(insert).toBeGreaterThanOrEqual(0);
+    expect(parse).toBeGreaterThan(insert);
+    expect(fill).toBeGreaterThan(parse);
+    expect(setActive).toBeGreaterThan(fill);
+  });
+
+  it("parses a new project's first draft with that draft's id", async () => {
+    const fake = serve(backend({ activeBuildId: null, builds: [] }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect((callsTo(fake, "POST", "parse")[0]!.body as { build_id: unknown }).build_id).toBe(100);
+    expect(res.structuredContent).toMatchObject({ action: "created_draft", build: { id: 100, number: 1 }, previous_active_build_id: null });
+  });
+
+  it("leaves the active build alone and names the empty draft when parsing a new draft fails", async () => {
+    const b = backend({ parse: () => ({ status: 502, body: { error: "bad gateway" } }) });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/could not parse/);
+    expect(text(res)).toMatch(/Draft v5 \(id:100\).*not made active/);
+    expect(text(res)).not.toMatch(/Nothing was saved/);
+    expect(callsTo(fake, "POST", "/rest/v1/builds")).toHaveLength(1);
+    expect(callsTo(fake, "PATCH", "/rest/v1/builds")).toHaveLength(0);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
+    expect(b.activeBuildId).toBe(30);
+  });
+
+  it("names the empty draft, keeping the HTTP error, when storing a new draft's compiled content fails", async () => {
+    const b = backend({ buildPatchStatus: 500 });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/HTTP 500\): upstream down\. Draft v5 \(id:100\).*not made active/);
+    expect((callsTo(fake, "POST", "parse")[0]!.body as { build_id: unknown }).build_id).toBe(100);
+    expect(callsTo(fake, "PATCH", "/rest/v1/projects")).toHaveLength(0);
+    expect(b.activeBuildId).toBe(30);
+  });
+
+  it("writes nothing when parsing fails while overwriting the active draft", async () => {
+    const fake = serve(backend({ builds: [build({ id: 30, number: 4, status: "draft" })], parse: () => ({ status: 502, body: { error: "bad gateway" } }) }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Nothing was saved/);
+    expect(writes(fake)).toHaveLength(0);
   });
 
   it("refuses, without writing the build, when the draft started publishing between read and PATCH", async () => {
