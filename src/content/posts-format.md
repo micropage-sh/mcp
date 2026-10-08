@@ -12,6 +12,7 @@ Each file in `posts/*.md` is one post: YAML front-matter + a Markdown body, push
 ---
 title: Launching our new dashboard
 slug: launching-new-dashboard   # optional; defaults to the filename minus a leading date prefix and .md
+date: 2026-07-07                # optional; public date, YYYY-MM-DD or ISO timestamp (default: publish time; no future dates)
 description: A quick look at what's new.
 visibility: listed              # listed | unlisted | none (default: listed)
 hero: launch-hero.png           # optional; local file, existing uploaded asset filename, or absolute URL
@@ -33,6 +34,7 @@ A companion image file next to the post (`posts/launch.md` + `posts/launch.png`)
 | ------ | ----------- |
 | `title` | Required. |
 | `slug` | Optional. Defaults to the filename minus a leading `YYYY-MM-DD-` date prefix. Unique per project. |
+| `date` | Optional. The post's public date: `YYYY-MM-DD` (midnight UTC) or an ISO 8601 timestamp (no offset means UTC). Past or today only; scheduling isn't supported. Sets the published date of a live post; a draft holds it until first publish. Omitted, the post keeps its current date. |
 | `description` | Web summary — shown in the `/content` archive, meta description, and og tags. |
 | `visibility` | `listed` (default, appears in the site's `/content` index) or `unlisted` (has a page but isn't listed). |
 | `hero` | Optional. A companion image file named like the post (e.g. `hello.jpg` next to `hello.md`), an asset filename, or an absolute URL. |

@@ -192,8 +192,9 @@ export function unhostedBodyImages(markdown: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * posts has no updated_at, so a preview is bound to a hash of every field a
- * save can change. Fixed field order keeps it stable without key sorting.
+ * posts.updated_at moves only on content edits of published posts, so a preview
+ * is bound to a hash of every field a save can change. Fixed field order keeps
+ * it stable without key sorting.
  */
 export function postContentFingerprint(post: PostRow): string {
   const fields = [
@@ -225,6 +226,8 @@ export interface UpsertPostPayload {
   form_id: string | null;
   subject: string | null;
   preheader: string | null;
+  /** Public date (YYYY-MM-DD or ISO 8601). Omitted leaves the stored date unchanged. */
+  date?: string;
 }
 
 /**

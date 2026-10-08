@@ -25,6 +25,7 @@ Each file in `posts/*.md` is one post: YAML front-matter + a Markdown body, push
 ---
 title: Launching our new dashboard
 slug: launching-new-dashboard   # optional; defaults to the filename minus a leading date prefix and .md
+date: 2026-07-07                # optional; public date, YYYY-MM-DD or ISO timestamp (default: publish time; no future dates)
 description: A quick look at what's new.
 visibility: listed              # listed | unlisted | none (default: listed)
 hero: launch-hero.png           # optional; local file, existing uploaded asset filename, or absolute URL

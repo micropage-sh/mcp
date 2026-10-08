@@ -199,6 +199,26 @@ export async function runListPosts(ctx: ToolContext, args: z.infer<typeof ListPo
 // upsert_post
 // ---------------------------------------------------------------------------
 
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})/;
+const POST_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?)?$/i;
+const POST_DATE_MESSAGE =
+  "date must be YYYY-MM-DD or an ISO 8601 timestamp, e.g. 2026-10-01 or 2026-10-01T09:30:00Z";
+
+function isRealDate(value: string): boolean {
+  const day = DATE_ONLY.exec(value);
+  if (!day) return false;
+  const [y, m, d] = [Number(day[1]), Number(day[2]), Number(day[3])];
+  const utc = new Date(Date.UTC(y, m - 1, d));
+  // Date.UTC rolls 2026-02-30 over into March, so a mismatch means the day does not exist.
+  return utc.getUTCFullYear() === y && utc.getUTCMonth() === m - 1 && utc.getUTCDate() === d && !Number.isNaN(Date.parse(value));
+}
+
+const PostDateInput = z
+  .string()
+  .trim()
+  .regex(POST_DATE, POST_DATE_MESSAGE)
+  .refine(isRealDate, { message: POST_DATE_MESSAGE });
+
 export const UpsertPostInput = z
   .object({
     project: ProjectRef,
@@ -253,6 +273,11 @@ export const UpsertPostInput = z
       .describe("Newsletter form name to send to (case-insensitive exact match). Required with email: true; only allowed with it."),
     subject: z.string().max(500).optional().describe("Email subject. Defaults to the title."),
     preview: z.string().max(500).optional().describe("Email preheader / inbox preview text."),
+    date: PostDateInput.optional().describe(
+      "Public date of the post, YYYY-MM-DD (midnight UTC) or ISO 8601 (2026-10-01T09:30:00Z; no offset means UTC). " +
+        "Sets the published date; past or today only (scheduling is not supported). On a draft it is held until " +
+        "the first publish. Unlike the other optional fields, omitting it leaves the post's date unchanged.",
+    ),
     confirm_live_update: z
       .boolean()
       .optional()
@@ -319,6 +344,7 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
     form_id: formId,
     subject: args.subject || null,
     preheader: args.preview || null,
+    ...(args.date ? { date: args.date } : {}),
   };
   const cursor = existing?.published_at ? await projectCursor(ctx, project) : null;
   const res = await upsertPost(ctx.http, payload);
@@ -661,7 +687,7 @@ Call it with a slug before editing a post: upsert_post replaces every field, so 
       title: "Create or update a micropage post",
       description: `Create or update one post (a blog post under /content and/or a newsletter email), keyed by slug: an existing slug is updated, a new one is created as a draft. Same as \`micropage posts push\` for one file; the arguments are the post front-matter fields plus body_markdown (see the micropage://posts/format resource).
 
-Every call replaces the whole post: an omitted optional field (description, hero, subject, preview, email/list) is cleared. To edit, read the post with list_posts(slug) first and pass everything back.
+Every call replaces the whole post: an omitted optional field (description, hero, subject, preview, email/list) is cleared. The exception is \`date\` (the post's public date, past or today): omitted, the post keeps its current date. To edit, read the post with list_posts(slug) first and pass everything back.
 
 Saving never sends email and never publishes a draft. But if the post is already published, the save changes the live page at once and rebuilds the site, so it needs confirm_live_update: true after the user agrees. ${REBUILD_NOTE}
 

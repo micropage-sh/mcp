@@ -338,6 +338,40 @@ describe("upsert_post", () => {
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/slug \\"taken\\" is already used by another post[\s\S]*list_posts/);
   });
+
+  it("passes date through only when given", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    for (const date of ["2026-09-01", "2026-09-01T09:30:00Z", "2026-09-01T09:30:00.123+02:00", "2026-09-01T09:30:00"]) {
+      const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b", date } });
+      expect(res.isError, text(res)).toBeFalsy();
+    }
+    await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    const bodies = callsTo(fake, "upsert-post").map((call) => call.body as Record<string, unknown>);
+    expect(bodies.map((body) => body.date)).toEqual(["2026-09-01", "2026-09-01T09:30:00Z", "2026-09-01T09:30:00.123+02:00", "2026-09-01T09:30:00", undefined]);
+    expect(bodies[4]).not.toHaveProperty("date");
+  });
+
+  it("rejects a malformed date before any network call", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    for (const date of ["2026-9-1", "01/09/2026", "2026-02-30", "2026-09-01T25:30:00Z", "2026-13-01", "yesterday", ""]) {
+      const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b", date } });
+      expect(res.isError, date).toBe(true);
+      expect(text(res), date).toMatch(/YYYY-MM-DD/);
+    }
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("surfaces the server's future-date refusal as a tool error", async () => {
+    const b = backend({
+      upsert: () => ({ status: 400, body: { error: "date is in the future; scheduling posts is not supported" } }),
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b", date: "2099-01-01" } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/date is in the future; scheduling posts is not supported/);
+  });
 });
 
 describe("preview_post_send + publish_post", () => {
