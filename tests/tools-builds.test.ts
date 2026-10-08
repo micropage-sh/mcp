@@ -515,7 +515,8 @@ describe("publish_build", () => {
       active_build_changed: false,
       after_event_id: 41,
       plan_tier: "pro",
-      eta: expect.stringMatching(/3 minutes/),
+      eta_seconds: 195,
+      eta: expect.stringMatching(/3 minutes[\s\S]*live within seconds/),
       live_url: "https://acme.micropage.sh",
       next: expect.stringMatching(/get_deploy_status/),
     });
@@ -543,7 +544,8 @@ describe("publish_build", () => {
       active_build_changed: true,
       previous_active_build_id: 31,
       after_event_id: 0,
-      eta: expect.stringMatching(/Pro\+/),
+      eta_seconds: 15,
+      eta: expect.stringMatching(/Pro\+[\s\S]*about 10 seconds/),
     });
   });
 
@@ -596,7 +598,7 @@ describe("get_deploy_status", () => {
         { id: 44, type: "deployment.completed" },
       ],
       live_url: "https://acme.micropage.sh",
-      next: expect.stringMatching(/308.*curl -L/),
+      next: expect.stringMatching(/edge caches refresh.*308.*curl -L/),
     });
     expect(clock.sleeps).toEqual([2000, 2000]);
   });

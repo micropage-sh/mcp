@@ -35,8 +35,8 @@ import { gateTool, structuredResult } from "./shared.js";
 export const buildToolsClock: { current: Clock } = { current: realClock };
 
 const DEPLOY_GOTCHAS =
-  "Right after deployment.completed the URL can still serve the previous version for a minute or so while Cloudflare " +
-  "updates its alias, and page paths redirect (308) to a trailing slash, so fetch with redirects followed (curl -L).";
+  "Right after deployment.completed the URL can still serve the previous version for up to a minute while Cloudflare's " +
+  "edge caches refresh, and page paths redirect (308) to a trailing slash, so fetch with redirects followed (curl -L).";
 
 async function resolveTargetBuild(
   ctx: ToolContext,
@@ -96,13 +96,13 @@ export type PublishBuildResult = z.infer<typeof PublishBuildOutput>;
 
 function etaFor(tier: PlanTier | null): { eta_seconds: number; eta: string } {
   if (tier === "pro_plus") {
-    return { eta_seconds: 90, eta: "Pro+ builds start right away; usually live in 1-2 minutes." };
+    return { eta_seconds: 15, eta: "Pro+ builds start right away; usually live in about 10 seconds." };
   }
   return {
-    eta_seconds: 270,
+    eta_seconds: 195,
     eta:
-      "Builds wait about 3 minutes in the queue on this plan (Pro+ skips the wait), then take 1-2 minutes; " +
-      "expect the site in about 4-5 minutes.",
+      "Builds wait about 3 minutes in the queue on this plan (Pro+ skips the wait), then go live within seconds; " +
+      "expect the site in about 3 minutes.",
   };
 }
 
