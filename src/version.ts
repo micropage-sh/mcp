@@ -3,4 +3,4 @@
 // (the remote entry runs where there is none); `npm run check` and a test
 // fail if it drifts from package.json.
 export const PACKAGE_NAME = "@micropage-sh/mcp";
-export const VERSION = "0.1.6";
+export const VERSION = "0.1.7";
