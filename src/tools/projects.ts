@@ -571,7 +571,7 @@ export async function runDeleteProject(
     domain: project.domain,
     note: alreadyRemoved
       ? "The project was already removed on the server."
-      : "Deletion started. The site, its Cloudflare Pages project and DNS are cleaned up in the background over the next minutes.",
+      : "Deletion started. Its hosted site files are cleaned up in the background over the next minutes.",
   };
 }
 
@@ -689,7 +689,7 @@ Images are not uploaded here: call upload_asset first, then reference the file w
       "delete_project",
       {
         title: "Delete a micropage project",
-        description: `Permanently delete a micropage project: its live site goes offline, and its Cloudflare Pages project, DNS record and the project record with its builds are removed. It cannot be undone.
+        description: `Permanently delete a micropage project: its live site goes offline, and its hosted site files and the project record with its builds are removed. It cannot be undone.
 
 Only call it when the user explicitly asks to delete this specific project. Pass \`confirm_domain\` with the project's micropage domain (from get_project) after the user has confirmed; a mismatch is refused without changing anything. Clients that support it also show the user a confirmation prompt, and declining aborts.
 
