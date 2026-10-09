@@ -61,12 +61,12 @@ describe("parseBuildRef", () => {
 });
 
 describe("formatDeployEvent", () => {
-  it("formats domain wiring steps like the CLI and falls back to type + payload", () => {
-    expect(formatDeployEvent({ event_type: "deployment.domain_wiring", payload: { step: "dns_ok", hostname: "a.micropage.sh" } })).toBe(
-      "deployment.domain_wiring: DNS CNAME ready (a.micropage.sh)",
+  it("formats the active domain wiring step like the CLI and falls back to type + payload", () => {
+    expect(formatDeployEvent({ event_type: "deployment.domain_wiring", payload: { step: "active", hostname: "a.micropage.sh" } })).toBe(
+      "deployment.domain_wiring: live — https://a.micropage.sh",
     );
-    expect(formatDeployEvent({ event_type: "deployment.domain_wiring", payload: { step: "timeout", hostname: "a.micropage.sh" } })).toBe(
-      "deployment.domain_wiring: still pending after wait (try https://a.micropage.sh shortly)",
+    expect(formatDeployEvent({ event_type: "deployment.domain_wiring", payload: { step: "dns_ok", hostname: "a.micropage.sh" } })).toBe(
+      'deployment.domain_wiring {"step":"dns_ok","hostname":"a.micropage.sh"}',
     );
     expect(formatDeployEvent({ event_type: "build.failed", payload: { step: "x" } })).toBe('build.failed {"step":"x"}');
     expect(formatDeployEvent({ event_type: "deployment.started", payload: null })).toBe("deployment.started");

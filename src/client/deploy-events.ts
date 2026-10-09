@@ -42,29 +42,11 @@ export function formatDeployEvent(ev: Pick<DeployEventRow, "event_type" | "paylo
     ev.payload && typeof ev.payload === "object" && !Array.isArray(ev.payload)
       ? (ev.payload as Record<string, unknown>)
       : null;
-  if (eventType === "deployment.domain_wiring" && payload) {
+  // Steps other than active come from retired Cloudflare Pages deploys; old events
+  // still print through the generic line below.
+  if (eventType === "deployment.domain_wiring" && payload?.step === "active") {
     const host = typeof payload.hostname === "string" ? payload.hostname : "";
-    const https = host ? `https://${host}` : "";
-    switch (payload.step) {
-      case "started":
-        return `${eventType}: preparing ${host || "platform hostname"}`;
-      case "dns_ok":
-        return `${eventType}: DNS CNAME ready (${host})`;
-      case "dns_resolve_ok":
-        return payload.skipped ? `${eventType}: skipped public DNS wait` : `${eventType}: hostname resolves (${host})`;
-      case "attach_ok":
-        return `${eventType}: registered on Cloudflare Pages (${host})`;
-      case "polling":
-        return `${eventType}: Pages status "${typeof payload.pages_status === "string" && payload.pages_status ? payload.pages_status : "…"}" (${host})`;
-      case "active":
-        return `${eventType}: live — ${https}`;
-      case "failed":
-        return `${eventType}: failed — ${truncate(payload.error ?? "unknown", 160)}`;
-      case "timeout":
-        return `${eventType}: still pending after wait (try ${https || "URL"} shortly)`;
-      default:
-        break;
-    }
+    return `${eventType}: live — ${host ? `https://${host}` : ""}`;
   }
   const extra = ev.payload ? ` ${truncate(JSON.stringify(ev.payload))}` : "";
   return `${eventType}${extra}`;
