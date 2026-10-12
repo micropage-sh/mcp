@@ -19,8 +19,11 @@ import {
   getMaxDeployEventId,
   pollDeployStatus,
   realClock,
+  SUPERSEDED_EVENT,
+  supersededTarget,
   type Clock,
   type DeployEvent,
+  type PollResult,
 } from "../client/deploy-events.js";
 import { MicropageError } from "../client/errors.js";
 import { eq } from "../client/http.js";
@@ -289,7 +292,12 @@ export const GetDeployStatusInput = z
 
 const DeployEventOut = z.object({
   id: z.number(),
-  type: z.string().describe("e.g. build.enqueued, deployment.started, deployment.domain_wiring, deployment.completed, build.failed."),
+  type: z
+    .string()
+    .describe(
+      "e.g. build.enqueued, deployment.started, deployment.domain_wiring, deployment.completed, build.failed, or " +
+        "build.superseded (a newer build took this deploy over, or nothing further will deploy).",
+    ),
   message: z.string(),
   created_at: z.string().nullable(),
 });
@@ -322,10 +330,27 @@ export const GetDeployStatusOutput = z.object({
   possibly_stuck: z
     .boolean()
     .describe("True when the build has been publishing with no deploy events for much longer than a deploy takes."),
+  superseded: z
+    .array(
+      z.object({
+        build_id: z.number(),
+        superseded_by_build_id: z.number().nullable(),
+        reason: z.string().nullable().describe("publish or live_build_changed."),
+      }),
+    )
+    .describe(
+      "Builds whose deploy was taken over by a newer build during this call, in order. When a newer build of the " +
+        "project took over, this call followed it, so `build` is the last one followed; empty when nothing was superseded.",
+    ),
   live_url: z.string().nullable(),
   next: z.string(),
 });
 export type GetDeployStatusResult = z.infer<typeof GetDeployStatusOutput>;
+
+/** Bounds how many build.superseded hand-offs one call follows. */
+export const MAX_SUPERSEDED_HOPS = 10;
+
+type SupersededEntry = GetDeployStatusResult["superseded"][number];
 
 /** Grace on top of the queue delay before a silent publish is called possibly stuck. */
 export const STUCK_GRACE_MS = 5 * 60 * 1000;
@@ -362,46 +387,109 @@ export async function runGetDeployStatus(
   const waitSeconds = Math.min(args.wait_seconds ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
   const cursorGiven = args.after_event_id !== undefined;
 
-  const poll = await pollDeployStatus({
-    http: ctx.http,
-    projectId: project.id,
-    buildId: target.id,
-    afterId: args.after_event_id ?? 0,
-    waitMs: waitSeconds * 1000,
-    clock,
-    // Without a cursor, a terminal event from an earlier publish of the same
-    // build would look like this one finishing; trust the status instead.
-    trustEvents: cursorGiven,
-    onPoll: handlerCtx
-      ? async ({ elapsedMs, status, newEvents }) => {
-          const last = newEvents[newEvents.length - 1];
-          await reportProgress(
-            handlerCtx,
-            Math.min(waitSeconds, Math.round(elapsedMs / 1000)),
-            waitSeconds,
-            last ? last.message : `status: ${status ?? "unknown"}`,
-          );
-        }
-      : undefined,
-  });
+  const start = clock.now();
+  const deadline = start + waitSeconds * 1000;
+  let buildId = target.id;
+  let afterId = args.after_event_id ?? 0;
+  const allEvents: DeployEvent[] = [];
+  const superseded: SupersededEntry[] = [];
+  // Why the superseded chain stopped short of a build to follow, if it did.
+  let unfollowed: "none" | "foreign" | "self" | "hops" | null = null;
+  let poll: PollResult;
 
-  const events: DeployEvent[] = poll.events.slice(-MAX_RETURNED_EVENTS);
+  for (;;) {
+    poll = await pollDeployStatus({
+      http: ctx.http,
+      projectId: project.id,
+      buildId,
+      afterId,
+      waitMs: Math.max(0, deadline - clock.now()),
+      clock,
+      // Without a cursor, a terminal event from an earlier publish of the same
+      // build would look like this one finishing; trust the status instead.
+      trustEvents: cursorGiven,
+      onPoll: handlerCtx
+        ? async ({ status, newEvents }) => {
+            const last = newEvents[newEvents.length - 1];
+            await reportProgress(
+              handlerCtx,
+              Math.min(waitSeconds, Math.round((clock.now() - start) / 1000)),
+              waitSeconds,
+              last ? last.message : `status: ${status ?? "unknown"}`,
+            );
+          }
+        : undefined,
+    });
+    allEvents.push(...poll.events);
+
+    const handOff = poll.terminal_event ? supersededTarget({ event_type: poll.terminal_event.type, payload: poll.terminal_payload }) : null;
+    if (!handOff || !poll.terminal_event) break;
+    const nextId = handOff.superseded_by_build_id;
+    superseded.push({ build_id: buildId, superseded_by_build_id: nextId, reason: handOff.reason });
+    if (nextId === null) {
+      unfollowed = "none";
+      break;
+    }
+    if (nextId === buildId) {
+      unfollowed = "self";
+      break;
+    }
+    if (superseded.length > MAX_SUPERSEDED_HOPS) {
+      unfollowed = "hops";
+      break;
+    }
+    // The payload is server-written but never trusted across tenants.
+    const owned = await getBuildById<{ id: number }>(ctx.http, project.id, nextId, "id");
+    if (!owned) {
+      unfollowed = "foreign";
+      break;
+    }
+    buildId = nextId;
+    // Event ids are global, and the newer build's terminal event comes after
+    // this one, so the superseded event's id is a safe cursor for it.
+    afterId = poll.terminal_event.id;
+  }
+
+  const events: DeployEvent[] = allEvents.slice(-MAX_RETURNED_EVENTS);
   const b = poll.build;
   const terminalType = poll.terminal_event?.type;
   const succeeded = !poll.done
     ? null
-    : terminalType === "build.failed" || (!terminalType && b.status === "failed")
-      ? false
-      : terminalType === "deployment.completed" || b.status === "deployed"
-        ? true
-        : null;
+    : terminalType === SUPERSEDED_EVENT
+      ? null
+      : terminalType === "build.failed" || (!terminalType && b.status === "failed")
+        ? false
+        : terminalType === "deployment.completed" || b.status === "deployed"
+          ? true
+          : null;
 
   const inProgress = IN_PROGRESS_STATUSES.has(b.status ?? "");
   const possiblyStuck = !poll.done && inProgress && (await looksStuck(ctx, b, Date.now()));
   const again = `Call get_deploy_status again with build "id:${b.id}" and after_event_id ${poll.after_event_id}.`;
 
+  const lastHop = superseded[superseded.length - 1];
+  const handedOff =
+    superseded.length > 0 && unfollowed === null
+      ? `Build id ${target.id}'s deploy was superseded by build id ${b.id}, so this call followed it` +
+        `${superseded.length > 1 ? ` (${superseded.length} hand-offs)` : ""}; keep using build "id:${b.id}". `
+      : "";
+
   let next: string;
-  if (poll.waiting_for_start) {
+  if (unfollowed === "none") {
+    next =
+      `Build v${b.number ?? "?"} (id ${b.id}) was superseded and nothing further will deploy from it, so there is ` +
+      "nothing more to wait for. Call get_project to check what is live.";
+  } else if (unfollowed !== null) {
+    const why =
+      unfollowed === "hops"
+        ? `after ${MAX_SUPERSEDED_HOPS} hand-offs in one call`
+        : unfollowed === "foreign"
+          ? `because build id ${lastHop?.superseded_by_build_id ?? "?"} is not in this project`
+          : "because the event named the same build";
+    next =
+      `Build v${b.number ?? "?"} (id ${b.id}) was superseded; stopped following ${why}. Call list_builds or get_project ` +
+      "to check what is live.";
+  } else if (poll.waiting_for_start) {
     next =
       `Waiting for the rebuild to start: build v${b.number ?? "?"} is ${b.status ?? "in an unknown state"} and no deploy ` +
       "event has arrived since after_event_id. Site rebuilds are queued for up to about 3 minutes unless the account is " +
@@ -421,6 +509,7 @@ export async function runGetDeployStatus(
   } else {
     next = `Build v${b.number ?? "?"} is ${b.status ?? "in an unknown state"}, not publishing. Call publish_build to publish it.`;
   }
+  next = handedOff + next;
 
   return {
     project_id: project.id,
@@ -432,12 +521,13 @@ export async function runGetDeployStatus(
       updated_at: b.updated_at ?? null,
     },
     events,
-    events_truncated: poll.events.length > events.length,
+    events_truncated: allEvents.length > events.length,
     after_event_id: poll.after_event_id,
     done: poll.done,
     succeeded,
     waiting_for_start: poll.waiting_for_start,
     possibly_stuck: possiblyStuck,
+    superseded,
     live_url: project.live_url,
     next,
   };
@@ -524,7 +614,7 @@ It returns at once with status publishing, after_event_id and an ETA (builds wai
       title: "Follow a micropage deploy",
       description: `Report the progress of a publish: the build status, the deploy events since after_event_id (queued, built, uploaded, domain wiring, completed or failed), whether it is done, and the live URL.
 
-Call it after publish_build or publish_post, passing the build and after_event_id they returned, and keep calling it with the returned after_event_id until done is true. With after_event_id, only a deploy event after it ends the wait: a site rebuild after a post change is queued (up to about 3 minutes unless the account is Pro+) and reports waiting_for_start until it begins. It waits up to wait_seconds (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}) per call, sending progress notifications meanwhile. possibly_stuck flags a publish with no events for far longer than a deploy takes.
+Call it after publish_build or publish_post, passing the build and after_event_id they returned, and keep calling it with the returned after_event_id until done is true. With after_event_id, only a deploy event after it ends the wait: a site rebuild after a post change is queued (up to about 3 minutes unless the account is Pro+) and reports waiting_for_start until it begins. It waits up to wait_seconds (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}) per call, sending progress notifications meanwhile. possibly_stuck flags a publish with no events for far longer than a deploy takes. When a newer build of the project takes the deploy over (build.superseded), it follows that build and returns it as \`build\`; keep calling with that build from then on.
 
 When it reports success: ${DEPLOY_GOTCHAS} Read-only; it never starts or cancels a deploy.`,
       inputSchema: GetDeployStatusInput,
@@ -533,13 +623,16 @@ When it reports success: ${DEPLOY_GOTCHAS} Read-only; it never starts or cancels
     },
     async (args, handlerCtx) => {
       const result = await runGetDeployStatus(ctx, args, handlerCtx);
-      const state = result.waiting_for_start
-        ? "waiting for the rebuild to start"
-        : result.possibly_stuck
-          ? "publishing, possibly stuck"
-          : !result.done
-            ? "still publishing"
-            : result.succeeded === true ? "deployed" : result.succeeded === false ? "failed" : result.build.status ?? "idle";
+      const supersededHere = result.done && result.superseded[result.superseded.length - 1]?.build_id === result.build.id;
+      const state = supersededHere
+        ? "superseded, not followed further"
+        : result.waiting_for_start
+          ? "waiting for the rebuild to start"
+          : result.possibly_stuck
+            ? "publishing, possibly stuck"
+            : !result.done
+              ? "still publishing"
+              : result.succeeded === true ? "deployed" : result.succeeded === false ? "failed" : result.build.status ?? "idle";
       return structuredResult(result, `Build v${result.build.number ?? "?"}: ${state}.`);
     },
   );

@@ -991,6 +991,167 @@ describe("get_deploy_status after a post change (publish_post's build_id + after
   });
 });
 
+describe("get_deploy_status across build.superseded", () => {
+  const superseded = (id: number, buildId: number, by: unknown, reason = "publish"): EventState => ({
+    id,
+    build_id: buildId,
+    event_type: "build.superseded",
+    payload: { superseded_by_build_id: by, reason },
+    created_at: "t",
+  });
+  const eventCalls = (fake: FakeFetch, buildId: number) =>
+    callsTo(fake, "GET", "/rest/v1/build_deploy_events").filter((c) => new URL(c.url).searchParams.get("build_id") === `eq.${buildId}`);
+
+  it("follows the newer build within the wait budget, from the superseded event's id", async () => {
+    const clock = fakeClock();
+    buildToolsClock.current = clock;
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" }), build({ id: 32, number: 6, status: "publishing" })],
+      // An earlier publish of 32, before the hand-off: must not end the wait.
+      events: [{ id: 39, build_id: 32, event_type: "deployment.completed", payload: null, created_at: "old" }],
+      onStatusPoll: (state, i) => {
+        if (i === 0) state.events.push(superseded(42, 31, 32));
+        if (i === 1) state.events.push({ id: 43, build_id: 32, event_type: "build.enqueued", payload: null, created_at: "t" });
+        if (i === 2) {
+          state.builds[1]!.status = "deployed";
+          state.events.push({ id: 44, build_id: 32, event_type: "deployment.completed", payload: null, created_at: "t" });
+        }
+      },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41, wait_seconds: 20 } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      build: { id: 32, number: 6, status: "deployed" },
+      done: true,
+      succeeded: true,
+      after_event_id: 44,
+      events: [{ id: 42, type: "build.superseded" }, { id: 43 }, { id: 44, type: "deployment.completed" }],
+      superseded: [{ build_id: 31, superseded_by_build_id: 32, reason: "publish" }],
+      next: expect.stringMatching(/superseded by build id 32[\s\S]*"id:32"[\s\S]*Deployed/),
+    });
+    expect(eventCalls(fake, 32).map((call) => new URL(call.url).searchParams.get("id"))[0]).toBe("gt.42");
+    expect(clock.t).toBeLessThan(20_000);
+    expect(text(res)).toMatch(/deployed/);
+  });
+
+  it("gives the followed build only the remaining wait and a cursor to resume it", async () => {
+    const clock = fakeClock();
+    buildToolsClock.current = clock;
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" }), build({ id: 32, number: 6, status: "publishing", updated_at: new Date().toISOString() })],
+      onStatusPoll: (state, i) => {
+        if (i === 2) state.events.push(superseded(42, 31, 32));
+      },
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41, wait_seconds: 10 } });
+    expect(res.structuredContent).toMatchObject({
+      build: { id: 32 },
+      done: false,
+      succeeded: null,
+      after_event_id: 42,
+      next: expect.stringMatching(/build "id:32" and after_event_id 42/),
+    });
+    expect(clock.sleeps.reduce((a, x) => a + x, 0)).toBeLessThanOrEqual(10_000);
+  });
+
+  it("finishes without following when nothing carries the change forward", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" })],
+      onStatusPoll: (state, i) => {
+        if (i === 0) state.events.push(superseded(42, 31, null, "live_build_changed"));
+      },
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41 } });
+    expect(res.structuredContent).toMatchObject({
+      build: { id: 31 },
+      done: true,
+      succeeded: null,
+      waiting_for_start: false,
+      after_event_id: 42,
+      superseded: [{ build_id: 31, superseded_by_build_id: null, reason: "live_build_changed" }],
+      next: expect.stringMatching(/superseded and nothing further will deploy/),
+    });
+    expect(b.statusPolls).toBe(1);
+    expect(text(res)).toMatch(/superseded/);
+  });
+
+  it("does not follow a build that is not in the project", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" })],
+      onStatusPoll: (state, i) => {
+        if (i === 0) state.events.push(superseded(42, 31, 999));
+      },
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41 } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      build: { id: 31 },
+      done: true,
+      succeeded: null,
+      superseded: [{ build_id: 31, superseded_by_build_id: 999 }],
+      next: expect.stringMatching(/build id 999 is not in this project/),
+    });
+    expect(eventCalls(fake, 999)).toHaveLength(0);
+    expect(b.statusPolls).toBe(1);
+  });
+
+  it("treats a malformed build id as nothing to follow", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" }), build({ id: 32, number: 6 })],
+      onStatusPoll: (state, i) => {
+        if (i === 0) state.events.push(superseded(42, 31, "32"));
+      },
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31", after_event_id: 41 } });
+    expect(res.structuredContent).toMatchObject({ build: { id: 31 }, done: true, superseded: [{ superseded_by_build_id: null }] });
+  });
+
+  it("stops after 10 hand-offs in one call", async () => {
+    buildToolsClock.current = fakeClock();
+    const builds = Array.from({ length: 12 }, (_, i) => build({ id: 100 + i, number: 10 + i, status: "publishing" }));
+    const b = backend({
+      activeBuildId: 100,
+      builds,
+      onStatusPoll: (state, i) => {
+        state.events.push(superseded(1000 + i, 100 + i, 101 + i));
+      },
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:100", after_event_id: 1 } });
+    const out = res.structuredContent as { build: { id: number }; superseded: unknown[]; done: boolean; succeeded: unknown; next: string };
+    expect(out.superseded).toHaveLength(11);
+    expect(out).toMatchObject({ build: { id: 110 }, done: true, succeeded: null, next: expect.stringMatching(/after 10 hand-offs/) });
+    expect(b.statusPolls).toBe(11);
+  });
+
+  it("without a cursor never follows a superseded event from the history", async () => {
+    buildToolsClock.current = fakeClock();
+    const b = backend({
+      activeBuildId: 31,
+      builds: [build({ id: 31, number: 5, status: "deployed" }), build({ id: 32, number: 6, status: "publishing" })],
+      events: [superseded(42, 31, 32)],
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "get_deploy_status", arguments: { project: UUID, build: "id:31" } });
+    expect(res.structuredContent).toMatchObject({ build: { id: 31 }, done: true, succeeded: true, superseded: [] });
+  });
+});
+
 describe("get_deploy_status: stuck publishes and the wait cap", () => {
   it("flags a build publishing with no events for longer than the queue delay plus 5 minutes", async () => {
     buildToolsClock.current = fakeClock();

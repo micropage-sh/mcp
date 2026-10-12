@@ -6,6 +6,7 @@ import { eq, gt, type Http } from "./http.js";
 export const TERMINAL_DEPLOY_EVENTS: ReadonlySet<string> = new Set([
   "build.failed",
   "deployment.completed",
+  "build.superseded",
   "archive.completed",
   "archive.failed",
 ]);
@@ -14,7 +15,37 @@ export const TERMINAL_DEPLOY_EVENTS: ReadonlySet<string> = new Set([
  * The events that end a publish. archive.* events belong to the zip export,
  * which runs on the same build, so they must not end a publish wait.
  */
-export const PUBLISH_TERMINAL_EVENTS: ReadonlySet<string> = new Set(["build.failed", "deployment.completed"]);
+export const PUBLISH_TERMINAL_EVENTS: ReadonlySet<string> = new Set(["build.failed", "deployment.completed", "build.superseded"]);
+
+/**
+ * Ends a build's deploy without deploying it: a newer build of the same
+ * project took the change over (superseded_by_build_id), or nothing will
+ * (null). The newer build's own terminal event has a larger id than this one.
+ */
+export const SUPERSEDED_EVENT = "build.superseded";
+
+export interface SupersededTarget {
+  superseded_by_build_id: number | null;
+  reason: string | null;
+}
+
+/**
+ * Reads a build.superseded payload; null for any other event. A build id that
+ * is not a positive integer reads as null. The id is only a claim: callers
+ * must check the build belongs to the project before following it.
+ */
+export function supersededTarget(ev: Pick<DeployEventRow, "event_type" | "payload">): SupersededTarget | null {
+  if (ev.event_type !== SUPERSEDED_EVENT) return null;
+  const payload =
+    ev.payload && typeof ev.payload === "object" && !Array.isArray(ev.payload)
+      ? (ev.payload as Record<string, unknown>)
+      : {};
+  const y = payload.superseded_by_build_id;
+  return {
+    superseded_by_build_id: typeof y === "number" && Number.isSafeInteger(y) && y > 0 ? y : null,
+    reason: typeof payload.reason === "string" ? payload.reason : null,
+  };
+}
 
 export interface DeployEventRow {
   id: number;
@@ -159,6 +190,8 @@ export interface PollResult {
   /** True once a terminal event arrived or the status settled (see PollOptions.trustEvents). */
   done: boolean;
   terminal_event: DeployEvent | null;
+  /** The terminal event's payload, null when there is none. */
+  terminal_payload: unknown;
   /** True when wait ran out before done. */
   timed_out: boolean;
   /**
@@ -184,6 +217,7 @@ export async function pollDeployStatus(options: PollOptions): Promise<PollResult
   let cursor = options.afterId;
   const events: DeployEvent[] = [];
   let terminal: DeployEvent | null = null;
+  let terminalPayload: unknown = null;
   let sawInProgress = false;
 
   for (;;) {
@@ -202,8 +236,12 @@ export async function pollDeployStatus(options: PollOptions): Promise<PollResult
     events.push(...fresh);
 
     const inProgress = IN_PROGRESS_STATUSES.has(build.status ?? "");
-    if (cursorMode) {
-      terminal ??= fresh.find((e) => PUBLISH_TERMINAL_EVENTS.has(e.type)) ?? null;
+    if (cursorMode && terminal === null) {
+      const row = rows.find((r) => PUBLISH_TERMINAL_EVENTS.has(r.event_type ?? ""));
+      if (row) {
+        terminal = toDeployEvent(row);
+        terminalPayload = row.payload ?? null;
+      }
     }
     const settledByStatus = !inProgress && (!cursorMode || sawInProgress);
     if (inProgress) sawInProgress = true;
@@ -227,6 +265,7 @@ export async function pollDeployStatus(options: PollOptions): Promise<PollResult
         after_event_id: cursor,
         done,
         terminal_event: terminal,
+        terminal_payload: terminalPayload,
         timed_out: !done,
         waiting_for_start: cursorMode && !done && !inProgress,
       };

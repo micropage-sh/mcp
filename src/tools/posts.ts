@@ -99,7 +99,8 @@ function followNote(o: RebuildOutcome): string {
   return o.after_event_id === null
     ? "The deploy cursor could not be read, so check the site or get_project in a few minutes instead of get_deploy_status."
     : `Follow it with get_deploy_status (build "id:${o.build_id}", after_event_id ${o.after_event_id}): it reports ` +
-        "waiting_for_start until the rebuild begins and done only once the rebuild's own deploy event arrives.";
+        "waiting_for_start until the rebuild begins and done only once the rebuild's own deploy event arrives. If a " +
+        "newer build takes the rebuild over, it follows that build and returns it as `build`; use that build id from then on.";
 }
 
 // ---------------------------------------------------------------------------
