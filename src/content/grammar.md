@@ -34,6 +34,8 @@ Emit one element per line. Do not nest tags. Do not invent element names. Do not
 
 Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, colors.primary, theme_color, og_image, og_type
 
+Blog block (optional, for the /content posts archive): `[blog]` then `title:` and `description:` lines. Separate from the site description.
+
 Nav entries: `Label -> /path` or `btn: Label -> url` / `btn-outline: Label -> url`
 
 Page header: `[Name -> /path]`
