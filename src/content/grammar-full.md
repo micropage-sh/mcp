@@ -62,6 +62,7 @@ Elements:
 - `btn-secondary: Label -> url`
 - `btn-outline: Label -> url`
 - `link: Label -> url`
+- `link: Label <- file.pdf` or `link: <- file.pdf`
 - `col:` starts a column; following indented-looking lines still sit at column scope as sibling element lines until the next `col:` or section
 - `form: name`
 - `input: Label` or `input: Label*`
@@ -77,7 +78,7 @@ Elements:
 
 Form confirmation: without `success:`, a form shows `Thank you. Your message was sent.` and a newsletter form shows `Thank you. You're subscribed.` (and no Submit again button). `newsletter:` in markup only chooses the wording — subscriber capture is enabled per form in the web app, never from markup.
 
-Images: `<- filename` resolves a file uploaded to the project. Do not hardcode random remote URLs unless asked.
+Images and file links: `<- filename` resolves a file uploaded to the project (not a URL on `link:`; never combine `<-` and `->` on a link). Do not hardcode random remote URLs unless asked.
 
 ## Rules for agents
 

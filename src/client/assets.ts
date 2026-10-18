@@ -8,7 +8,7 @@ import { ipFamily, isPrivateAddress } from "./ip.js";
 
 export { isPrivateAddress };
 
-/** Same extensions and types as the CLI (cli/src/mime.js); upload-file stores whatever type it is sent. */
+/** Same extensions and types as the CLI (cli/src/mime.js); upload-file sets the stored type from the extension, not from what it is sent. */
 export const ASSET_MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
   ".png": "image/png",
   ".jpg": "image/jpeg",
