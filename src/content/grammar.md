@@ -32,7 +32,9 @@ One project can contain one or more `.page` files. A typical file:
 
 Emit one element per line. Do not nest tags. Do not invent element names. Do not use inline colors.
 
-Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, colors.primary, theme_color, og_image, og_type
+Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, theme_color, og_image, og_type
+
+Site colors go in an indented block inside `[site]`: `colors:` then `  primary: #5c6fff` on the next line (also secondary, success, warning, info, danger; hex only). Optional `[site.dark]` takes `colors:` and `logo:` and applies when the visitor's system is in dark mode.
 
 Blog block (optional, for the /content posts archive): `[blog]` then `title:` and `description:` lines. Separate from the site description.
 
@@ -46,7 +48,7 @@ Optional page meta: `meta:` then indented description, og_type, canonical, keywo
 Languages: put each language in a folder (`[Acasă -> /ro]`, `[Despre -> /ro/despre]`). A language folder sets the page language when its code is used in a `lang:` or `translation:` line, or the folder holds at least two pages (so `/it/services` alone stays in the site language). Nav, footer and /content are shared by all languages.
 
 Sections:
-- `/// hero` optional `align:center` `bg:primary|secondary|muted|success|info`
+- `/// hero` optional `align:center` `bg:primary|primary-subtle|secondary|muted|success|warning|info|danger|dark|light`
 - `/// section` same optional modifiers
 - `/// html` — raw HTML; agents should avoid this unless asked
 
