@@ -57,7 +57,7 @@ Elements:
 - `- item` (unordered) / `1. item` (ordered; starts at the first number) — one item per line, consecutive lines form one list; a blank line or switching `-`/`1.` starts a new list; no nesting, plain text; works in sections, columns, footer. Use `p:` for a paragraph starting with `- ` or `2024. `
 - `table: Caption` (optional) then `| A | B |` rows — first row is the header; `|---|` separator optional; plain-text cells; `\|` is a literal pipe
 - `icon: bi bi-name` (Bootstrap Icons)
-- `img: alt: text <- filename.png` or `img: <- filename.png`
+- `img: Description <- filename.png` (the words before `<-` become the alt text), `img: alt: text <- filename.png` (explicit, wins if both are present) or `img: <- filename.png` (empty alt)
 - `button: Label -> url`
 - `btn-secondary: Label -> url`
 - `btn-outline: Label -> url`
@@ -189,6 +189,8 @@ img: <- hero.png
 ```
 
 Upload the file in the Files tab, then reference it by its exact filename. Filenames are case-sensitive. With the CLI, anything in the project's `assets/` folder is uploaded on push.
+
+The words before `<-` become the alt text: `img: Our team at the meetup <- team.jpg`. With nothing before `<-`, the alt is empty.
 
 Two other forms exist, mostly for a first draft:
 
