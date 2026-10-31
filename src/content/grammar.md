@@ -88,6 +88,7 @@ Images and file links: `<- filename` resolves a file uploaded to the project (no
 - Read PROJECT_AGENT.md in the project if present — it has tokens and tone.
 - Keep structure stable across edits. Change copy and order before inventing new sections.
 - Do not wrap the file in markdown fences when writing it back.
+- Describe every image before `<-`: those words become its alt text. What the generated HTML does for accessibility: https://docs.micropage.sh/docs/concepts/accessibility/
 - Do not emit React, Tailwind class soup, or custom components.
 - After edits, the human publishes from the web app (Publish) or `micropage publish` (Pro CLI). Agents connected through the Micropage MCP server (`@micropage-sh/mcp`, Pro) save drafts with `save_page` and call `publish_build` only when the user asks: https://docs.micropage.sh/docs/mcp/overview/
 
