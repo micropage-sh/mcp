@@ -120,7 +120,7 @@ submit: Get early access
 
 Prices are in USD and exclude VAT/sales tax; Paddle (merchant of record) adds tax for the buyer's country at checkout. Form submission limits are per project, per calendar month (UTC); spam-flagged submissions don't count.
 
-- Free: 1 project, starter AI credits, 100 submissions per project per month, `*.micropage.sh` host, badge
+- Free: 1 project, starter AI credits, 100 submissions per project per month, `*.micropage.live` host, badge
 - Pro ($6/mo or $49/yr): custom domain, newsletter sending (optionally from your own sending domain), CLI, MCP server, zip export, CSV, daily submission digest, no badge, 5 projects, 1,000 submissions per project per month
 - Pro+ ($12/mo or $98/yr): everything in Pro, plus webhooks, instant email per submission, CI deploy tokens, priority builds, 20 projects, 10,000 submissions per project per month
 
@@ -309,7 +309,9 @@ Source: https://docs.micropage.sh/docs/concepts/custom-domains/
 
 Custom domains are a Pro feature (Pro and Pro+).
 
-Each Micropage project has a primary host (for example `my-site.micropage.sh`). On Pro and Pro+ you can also attach your own custom subdomain such as `www.example.com` and we'll serve the project over HTTPS at that address with a valid SSL certificate.
+Each Micropage project has a primary host (for example `my-site.micropage.live`). On Pro and Pro+ you can also attach your own custom subdomain such as `www.example.com` and we'll serve the project over HTTPS at that address with a valid SSL certificate.
+
+Platform addresses live on `micropage.live`: every site starts there, and Free sites stay there. Sites published before the move keep working: their old `*.micropage.sh` address redirects to the same slug on `micropage.live`.
 
 Setup
 
