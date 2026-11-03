@@ -163,7 +163,7 @@ describe("list_projects", () => {
         { uuid: OTHER, live_url: "https://www.shop.com", active_build: null },
         {
           uuid: UUID,
-          live_url: "https://acme.micropage.sh",
+          live_url: "https://acme.micropage.live",
           editor_url: "https://app.micropage.sh/editor/7",
           active_build: { id: 30, number: 4, status: "deployed" },
         },

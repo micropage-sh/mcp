@@ -39,7 +39,7 @@ export const ProjectSummary = z.object({
   id: z.number().describe("Numeric project id."),
   uuid: z.string(),
   name: z.string().nullable(),
-  domain: z.string().nullable().describe("micropage slug: the site lives at https://<domain>.micropage.sh."),
+  domain: z.string().nullable().describe("micropage slug: the site lives at https://<domain>.micropage.live."),
   custom_domain: z.string().nullable(),
   status: z.string().nullable(),
   active_build_id: z.number().nullable(),

@@ -776,7 +776,7 @@ describe("publish_build", () => {
       plan_tier: "pro",
       eta_seconds: 195,
       eta: expect.stringMatching(/3 minutes[\s\S]*live within seconds/),
-      live_url: "https://acme.micropage.sh",
+      live_url: "https://acme.micropage.live",
       next: expect.stringMatching(/get_deploy_status/),
     });
   });
@@ -856,7 +856,7 @@ describe("get_deploy_status", () => {
         { id: 43, message: "deployment.domain_wiring: live — https://acme.micropage.sh" },
         { id: 44, type: "deployment.completed" },
       ],
-      live_url: "https://acme.micropage.sh",
+      live_url: "https://acme.micropage.live",
       next: expect.stringMatching(/edge caches refresh.*308.*curl -L/),
     });
     expect(clock.sleeps).toEqual([2000, 2000]);
@@ -1349,7 +1349,7 @@ describe("list_builds, get_page_source, create_project", () => {
     expect(res.isError, text(res)).toBeFalsy();
     expect(callsTo(fake, "POST", "/rest/v1/projects")[0]!.body).toEqual({ name: "New site", domain: "new-site" });
     expect(res.structuredContent).toMatchObject({
-      project: { id: 9, domain: "new-site", live_url: "https://new-site.micropage.sh" },
+      project: { id: 9, domain: "new-site", live_url: "https://new-site.micropage.live" },
       starter: { example: "startup-landing", source: expect.stringContaining("[site]"), referenced_files: ["favicon.svg", "logo.svg"] },
     });
   });
@@ -1380,7 +1380,7 @@ describe("delete_project", () => {
   it("refuses a wrong or missing confirm_domain without deleting", async () => {
     const fake = serve(backend());
     const c = await connect(fake, ENV);
-    for (const confirm_domain of ["acme2", undefined]) {
+    for (const confirm_domain of ["acme2", "shop.acme.micropage.live", undefined]) {
       const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, ...(confirm_domain ? { confirm_domain } : {}) } });
       expect(res.isError).toBe(true);
       expect(text(res)).toMatch(/confirm_domain.*acme/);
@@ -1388,10 +1388,21 @@ describe("delete_project", () => {
     expect(writes(fake)).toHaveLength(0);
   });
 
+  it("accepts confirm_domain with the current or the legacy platform suffix", async () => {
+    for (const confirm_domain of ["acme.micropage.live", "ACME.micropage.sh"]) {
+      const fake = serve(backend());
+      const c = await connect(fake, ENV, { elicit: "decline" });
+      const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, confirm_domain } });
+      expect(text(res)).not.toMatch(/confirm_domain/);
+      expect(text(res)).toMatch(/declined/);
+      expect(writes(fake)).toHaveLength(0);
+    }
+  });
+
   it("aborts when the user declines the elicitation", async () => {
     const fake = serve(backend());
     const c = await connect(fake, ENV, { elicit: "decline" });
-    const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, confirm_domain: "acme.micropage.sh" } });
+    const res = await c.callTool({ name: "delete_project", arguments: { project: UUID, confirm_domain: "acme.micropage.live" } });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/declined/);
     expect(elicited).toHaveLength(1);

@@ -1,7 +1,7 @@
 import * as z from "zod";
 
 import type { AuthProvider } from "./auth-provider.js";
-import { projectUrl, type MicropageConfig } from "./config.js";
+import { platformSlug, projectUrl, type MicropageConfig } from "./config.js";
 import { MicropageError } from "./errors.js";
 import { eq, type Filters, type Http } from "./http.js";
 
@@ -22,7 +22,7 @@ export const ProjectRef = z
   .min(1)
   .max(300)
   .describe(
-    'Which project: its uuid, its numeric id, its micropage hostname ("acme" or "acme.micropage.sh") or its ' +
+    'Which project: its uuid, its numeric id, its micropage hostname ("acme" or "acme.micropage.live") or its ' +
       "custom domain (\"www.acme.com\"). A full URL also works. Get valid values from list_projects.",
   );
 
@@ -65,7 +65,7 @@ export function toProject(row: ProjectRow, config: ProjectRefDeps["config"]): Pr
 export type ParsedProjectRef =
   | { kind: "uuid"; value: string }
   | { kind: "id"; value: number }
-  /** `{slug}.<baseDomain>` or a bare slug: matches projects.domain. */
+  /** `{slug}.<platform domain>` (current or legacy) or a bare slug: matches projects.domain. */
   | { kind: "slug"; value: string }
   /** Any other hostname: a custom domain (or, as the CLI allows, a domain stored verbatim). */
   | { kind: "host"; value: string };
@@ -94,11 +94,8 @@ export function parseProjectRef(ref: string, baseDomain: string): ParsedProjectR
     );
   }
 
-  const base = baseDomain.toLowerCase();
-  if (host.endsWith(`.${base}`)) {
-    const slug = host.slice(0, -(base.length + 1));
-    if (slug && !slug.includes(".")) return { kind: "slug", value: slug };
-  }
+  const slug = platformSlug(host, baseDomain);
+  if (slug) return { kind: "slug", value: slug };
   if (!host.includes(".")) return { kind: "slug", value: host };
   return { kind: "host", value: host };
 }

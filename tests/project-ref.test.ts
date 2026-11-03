@@ -30,18 +30,30 @@ describe("parseProjectRef", () => {
     [UUID.toUpperCase(), { kind: "uuid", value: UUID }],
     ["42", { kind: "id", value: 42 }],
     ["acme", { kind: "slug", value: "acme" }],
+    ["acme.micropage.live", { kind: "slug", value: "acme" }],
+    ["https://Acme.micropage.live/blog/post?x=1#y", { kind: "slug", value: "acme" }],
     ["acme.micropage.sh", { kind: "slug", value: "acme" }],
     ["https://Acme.micropage.sh/blog/post?x=1#y", { kind: "slug", value: "acme" }],
     ["www.acme.com", { kind: "host", value: "www.acme.com" }],
     ["https://www.acme.com:443/pricing/", { kind: "host", value: "www.acme.com" }],
+    ["shop.acme.micropage.live", { kind: "host", value: "shop.acme.micropage.live" }],
     ["shop.acme.micropage.sh", { kind: "host", value: "shop.acme.micropage.sh" }],
   ])("%s", (input, expected) => {
-    expect(parseProjectRef(input, "micropage.sh")).toEqual(expected);
+    expect(parseProjectRef(input, "micropage.live")).toEqual(expected);
+  });
+
+  it("accepts the current and legacy platform suffixes whatever MICROPAGE_BASE_DOMAIN is", () => {
+    for (const base of ["micropage.live", "micropage.sh", "mp.test"]) {
+      expect(parseProjectRef("acme.micropage.live", base)).toEqual({ kind: "slug", value: "acme" });
+      expect(parseProjectRef("acme.micropage.sh", base)).toEqual({ kind: "slug", value: "acme" });
+    }
+    expect(parseProjectRef("acme.mp.test", "mp.test")).toEqual({ kind: "slug", value: "acme" });
+    expect(parseProjectRef("acme.mp.test", "micropage.live")).toEqual({ kind: "host", value: "acme.mp.test" });
   });
 
   it("rejects strings that are not a hostname (and so cannot reach the or= filter)", () => {
-    expect(() => parseProjectRef("a.com,user_id.eq.x", "micropage.sh")).toThrow(MicropageError);
-    expect(() => parseProjectRef("my project", "micropage.sh")).toThrow(/list_projects/);
+    expect(() => parseProjectRef("a.com,user_id.eq.x", "micropage.live")).toThrow(MicropageError);
+    expect(() => parseProjectRef("my project", "micropage.live")).toThrow(/list_projects/);
   });
 });
 
@@ -61,7 +73,7 @@ describe("resolveProject", () => {
     expect(p).toMatchObject({
       id: 7,
       uuid: UUID,
-      live_url: "https://acme.micropage.sh",
+      live_url: "https://acme.micropage.live",
       editor_url: "https://app.micropage.sh/editor/7",
     });
   });

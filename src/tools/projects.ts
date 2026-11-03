@@ -3,6 +3,7 @@ import * as z from "zod";
 
 import { DESTRUCTIVE, OUT, RO, WRITE } from "../annotations.js";
 import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type SaveDraftResult } from "../client/builds.js";
+import { CNAME_TARGET, platformDomains } from "../client/config.js";
 import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
 import { concatPages } from "../client/pages.js";
@@ -168,7 +169,7 @@ export async function runGetProject(ctx: ToolContext, args: z.infer<typeof GetPr
           ssl_status: ch?.custom_hostname_ssl_status ?? null,
           verification_errors: ch?.custom_hostname_verification_errors ?? null,
           last_checked_at: ch?.custom_hostname_last_checked_at ?? null,
-          cname_target: `cname.${ctx.config.baseDomain}`,
+          cname_target: CNAME_TARGET,
         }
       : null,
   };
@@ -295,7 +296,7 @@ export const CreateProjectInput = z
       .max(80)
       .optional()
       .describe(
-        "Optional micropage subdomain: \"acme\" serves at https://acme.micropage.sh. Lowercase letters, digits and " +
+        "Optional micropage subdomain: \"acme\" serves at https://acme.micropage.live. Lowercase letters, digits and " +
           "hyphens, up to 58 characters. Omit it to get one derived from the name plus a short random suffix.",
       ),
   })
@@ -315,10 +316,14 @@ export const CreateProjectOutput = z.object({
 });
 export type CreateProjectResult = z.infer<typeof CreateProjectOutput>;
 
+/** Strips one `.<platform domain>` suffix (current or legacy) when present. */
+function stripPlatformSuffix(d: string, baseDomain: string): string {
+  const suffix = platformDomains(baseDomain).find((domain) => d.endsWith(`.${domain}`));
+  return suffix ? d.slice(0, -(suffix.length + 1)) : d;
+}
+
 export function normalizeDomain(input: string, baseDomain: string): string {
-  let d = input.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  const suffix = `.${baseDomain.toLowerCase()}`;
-  if (d.endsWith(suffix)) d = d.slice(0, -suffix.length);
+  const d = stripPlatformSuffix(input.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""), baseDomain);
   if (!DOMAIN_RE.test(d)) {
     throw new MicropageError(
       "INVALID_DOMAIN",
@@ -502,7 +507,7 @@ export const DeleteProjectInput = z
       .max(300)
       .optional()
       .describe(
-        "The project's micropage domain, typed back to confirm (e.g. \"acme-3f9a1c\" or \"acme-3f9a1c.micropage.sh\"). " +
+        "The project's micropage domain, typed back to confirm (e.g. \"acme-3f9a1c\" or \"acme-3f9a1c.micropage.live\"). " +
           "Ask the user to confirm the deletion first; get_project shows the domain.",
       ),
   })
@@ -528,10 +533,10 @@ export async function runDeleteProject(
   await gateTool(ctx, "delete_project");
   const project = await resolveProject(ctx, args.project);
   const expected = project.domain ?? project.uuid;
-  const suffix = `.${ctx.config.baseDomain.toLowerCase()}`;
-  const given = args.confirm_domain?.toLowerCase().endsWith(suffix)
-    ? args.confirm_domain.slice(0, -suffix.length)
-    : args.confirm_domain;
+  const given =
+    args.confirm_domain === undefined
+      ? undefined
+      : stripPlatformSuffix(args.confirm_domain.toLowerCase(), ctx.config.baseDomain);
   requireConfirmMatch(given, expected, "confirm_domain", `Deleting project "${project.name ?? expected}"`);
 
   const outcome = elicitConfirmation(handlerCtx, ctx.clientCapabilities(handlerCtx), {
@@ -603,7 +608,7 @@ Read-only. Not available with a deploy token, which is limited to its one projec
       title: "Show one micropage project",
       description: `Show one micropage project in detail: live URL, editor URL, the active build (the default publish target), the latest build, the build that is live now, the failure reason if a build failed, and read-only custom-domain status (Cloudflare hostname and certificate state, and the CNAME target).
 
-Use it to check what is live versus drafted before publishing, to explain why a build failed, or to answer "is my custom domain working?". Accepts the project's uuid, numeric id, micropage domain ("acme" or "acme.micropage.sh") or custom domain.
+Use it to check what is live versus drafted before publishing, to explain why a build failed, or to answer "is my custom domain working?". Accepts the project's uuid, numeric id, micropage domain ("acme" or "acme.micropage.live") or custom domain.
 
 It does not return the page source (use get_page_source) or follow a deploy in progress (use get_deploy_status), and it cannot change the custom domain; that is done in the micropage editor.`,
       inputSchema: GetProjectInput,

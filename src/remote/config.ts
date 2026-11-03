@@ -51,8 +51,8 @@ export const MAX_REQUEST_BODY_BYTES = 6 * 1024 * 1024;
  * Our own infrastructure, which a `{url}` upload must never fetch: these
  * hosts are public, so the private-address check alone would let a
  * model-supplied URL reach them from inside our account. Customer sites under
- * *.micropage.sh stay fetchable on purpose (re-uploading an image from one's
- * own site is legitimate).
+ * *.micropage.live and *.micropage.sh stay fetchable on purpose (re-uploading
+ * an image from one's own site is legitimate).
  */
 export const DENIED_HOSTS = Object.freeze({
   exact: ["build-compiler.micropage.sh", "parser.micropage.sh", "micropage-publisher.blckshp.xyz"],

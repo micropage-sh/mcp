@@ -141,7 +141,10 @@ The switches accept `1`, `true`, `yes` or `on`. Endpoint overrides use the
 CLI's variables (`src/client/config.ts`): `MICROPAGE_SUPABASE_URL`,
 `MICROPAGE_SUPABASE_ANON_KEY`, `MICROPAGE_APP_URL`,
 `MICROPAGE_BUILD_COMPILER_URL` (or `MICROPAGE_PARSER_URL`) and
-`MICROPAGE_BASE_DOMAIN`.
+`MICROPAGE_BASE_DOMAIN` (the platform domain sites live under, default
+`micropage.live`; project refs and `confirm_domain` also accept the legacy
+`.micropage.sh` suffix, and the custom-domain CNAME target stays
+`cname.micropage.sh`).
 
 When you add a switch, add it to `server.json`'s `environmentVariables` too,
 so registry clients can offer it. On the hosted server a switch is a column

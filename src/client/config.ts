@@ -24,8 +24,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MicropageConfi
       env.MICROPAGE_BUILD_COMPILER_URL ||
       env.MICROPAGE_PARSER_URL ||
       "https://build-compiler.micropage.sh",
-    baseDomain: env.MICROPAGE_BASE_DOMAIN || "micropage.sh",
+    baseDomain: env.MICROPAGE_BASE_DOMAIN || "micropage.live",
   };
+}
+
+/**
+ * Where a customer's custom hostname must CNAME to. Cloudflare for SaaS runs
+ * on the micropage.sh zone whatever domain the platform sites use, so this is
+ * not derived from baseDomain.
+ */
+export const CNAME_TARGET = "cname.micropage.sh";
+
+/**
+ * Domains a `{slug}.<domain>` hostname may carry: the configured one, the
+ * current platform domain and the legacy one, which redirects to it. A slug is
+ * the same label on each, so refs and confirmations accept all of them.
+ */
+export function platformDomains(baseDomain: string): string[] {
+  return [...new Set([baseDomain.toLowerCase(), "micropage.live", "micropage.sh"])];
+}
+
+/**
+ * The slug of a `{slug}.<platform domain>` hostname (already lowercased, no
+ * scheme or path), or null when the host is not one: a bare label, a custom
+ * domain or a deeper `a.b.<platform domain>` name.
+ */
+export function platformSlug(host: string, baseDomain: string): string | null {
+  for (const domain of platformDomains(baseDomain)) {
+    const suffix = `.${domain}`;
+    if (!host.endsWith(suffix)) continue;
+    const slug = host.slice(0, -suffix.length);
+    if (slug && !slug.includes(".")) return slug;
+  }
+  return null;
 }
 
 /**
