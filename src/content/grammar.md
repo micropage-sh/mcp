@@ -32,7 +32,9 @@ One project can contain one or more `.page` files. A typical file:
 
 Emit one element per line. Do not nest tags. Do not invent element names. Do not use inline colors.
 
-Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, theme_color, og_image, og_type
+Site keys (non-exhaustive): title, description, logo, favicon, lang, keywords, theme_color, og_image, og_type, type, profiles, email, alternate_name, founded, legal_name
+
+Site identity: `type:` is organization (default) or person. `profiles:` takes comma-separated URLs of your accounts elsewhere (schema.org sameAs; an x.com link also sets twitter:site). `founded:` and `legal_name:` are organization only. `twitter_handle:` is no longer supported. Every page's JSON-LD (identity with @id {site url}/#organization or #person, WebSite, BlogPosting on posts) is generated from `[site]`. A page with its own `<script type="application/ld+json">` in a `/// html` block or inline html element gets no generated JSON-LD; footer JSON-LD counts for every page. Hand-written JSON-LD should reuse the platform @id for the identity.
 
 Site colors go in an indented block inside `[site]`: `colors:` then `  primary: #5c6fff` on the next line (also secondary, success, warning, info, danger; hex only). Optional `[site.dark]` takes `colors:` and `logo:` and applies when the visitor's system is in dark mode.
 
