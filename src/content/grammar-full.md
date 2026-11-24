@@ -69,7 +69,7 @@ Elements:
 - `link: Label <- file.pdf` or `link: <- file.pdf`
 - `col:` starts a column; following indented-looking lines still sit at column scope as sibling element lines until the next `col:` or section
 - `form: name`
-- `input: Label` or `input: Label*`
+- `input: Label` or `input: Label*`, optional trailing `type:email|tel|name|organization|text` (`input: Courriel* type:email`; same for `textfield:`)
 - `text:` / `textarea:`
 - `select: Label [A, B, C]`
 - `checkboxes: Label [A, B]`
@@ -78,7 +78,22 @@ Elements:
 - `success: Message` — confirmation text after a successful submit; optional, max 300 chars
 - `newsletter: true` / `newsletter: false`
 
-`*` at the end of a field label means required.
+`*` at the end of a field label means required. With an input `type:`, the `*` can go before or after it.
+
+Autofill: an `input:` with one of these exact labels (any case) gets a hint automatically and stays a text input:
+- email, e-mail, email address, e-mail address, your email, your email address, work email: autocomplete email, inputmode email
+- name, full name, your name, your full name: autocomplete name
+- phone, phone number, telephone, your phone, your phone number: autocomplete tel, inputmode tel
+- company, company name, organization, organisation: autocomplete organization
+
+For other labels and languages use the trailing `type:` (after a space, only these values):
+- `type:email`: email input and autocomplete email
+- `type:tel`: tel input and autocomplete tel
+- `type:name`: autocomplete name
+- `type:organization`: autocomplete organization
+- `type:text`: text input, no hint
+
+Autofill hints are only for the visitor's own details: add `type:text` when a matching field asks about someone or something else (friend, attendee, pet). `type:email` makes the browser block anything that isn't one well-formed address (`john at gmail`, two addresses, `none`); the server doesn't check the format. On a newsletter form keep `email` in the label: subscriber capture ignores `type:email` and doesn't recognize `E-mail` or labels like `Courriel`.
 
 Form confirmation: without `success:`, a form shows `Thank you. Your message was sent.` and a newsletter form shows `Thank you. You're subscribed.` (and no Submit again button). `newsletter:` in markup only chooses the wording — subscriber capture is enabled per form in the web app, never from markup.
 
@@ -90,6 +105,7 @@ Images and file links: `<- filename` resolves a file uploaded to the project (no
 - Read PROJECT_AGENT.md in the project if present — it has tokens and tone.
 - Keep structure stable across edits. Change copy and order before inventing new sections.
 - Do not wrap the file in markdown fences when writing it back.
+- Keyboard focus: theme controls, `link:` lines and underlined links in text get the theme's focus ring. Other Bootstrap components in raw HTML (`accordion-button`, `page-link`, `btn-close`, `btn-check`, `form-range`, `form-control-plaintext`, `focus-ring`, carousel controls) can have no outline, so add a `:focus-visible` outline for any you use. Tab and Shift+Tab show the focused element below a header pinned to the top (JavaScript only; not on scroll-snapping pages, on pages that scroll inside `body` or a wrapper, or inside your own sticky or fixed elements; untested in Safari). Focus inside an iframe can land under the header, and so can tabbing out of one. Anchor targets are not moved: if one lands under the header, put `scroll-margin-top` on that target. Don't add `scroll-padding` on `html`: in Chromium it makes the page jump when focus moves into the sticky header.
 - Describe every image before `<-`: those words become its alt text. What the generated HTML does for accessibility: https://docs.micropage.sh/docs/concepts/accessibility/
 - Do not emit React, Tailwind class soup, or custom components.
 - After edits, the human publishes from the web app (Publish) or `micropage publish` (Pro CLI). Agents connected through the Micropage MCP server (`@micropage-sh/mcp`, Pro) save drafts with `save_page` and call `publish_build` only when the user asks: https://docs.micropage.sh/docs/mcp/overview/
@@ -234,7 +250,7 @@ textarea: Message
 submit: Send
 ```
 
-Fields ending in `*` are required. The form name (e.g. `Contact`) is used to identify submissions.
+Fields ending in `*` are required (on an `input:`, the `*` can also come just before a `type:` suffix). The form name (e.g. `Contact`) is used to identify submissions.
 
 Supported field types
 
@@ -246,6 +262,51 @@ Supported field types
 - `submit:` (alias `save:`) — submit button
 
 All aliases above are supported and not deprecated. Use the canonical names in new markup for consistency.
+
+Autofill and field types
+
+An `input:` with one of these labels tells the browser what to autofill:
+
+| Label | autocomplete | inputmode |
+|-------|--------------|-----------|
+| email, e-mail, email address, e-mail address, your email, your email address, work email | email | email |
+| name, full name, your name, your full name | name | – |
+| phone, phone number, telephone, your phone, your phone number | tel | tel |
+| company, company name, organization, organisation | organization | – |
+
+The whole label must match. Case and extra spaces don't matter, and other languages aren't matched. A label never changes the field's type.
+
+For any other label, add `type:` at the end of the line, after a space. It works the same with `textfield:`, and the required `*` can go before or after it:
+
+```
+form: Contact
+
+input: Courriel* type:email
+input: Nom complet type:name*
+input: Friend's details type:text
+
+submit: Envoyer
+```
+
+| Suffix | Input type | autocomplete |
+|--------|------------|--------------|
+| `type:email` | email | email |
+| `type:tel` | tel | tel |
+| `type:name` | text | name |
+| `type:organization` | text | organization |
+| `type:text` | text | – |
+
+The suffix isn't part of the label or the field's name. Any other value stays in the label as text.
+
+Autofill hints are only for the visitor's own details. If a field like `Name` or `Email` asks about someone or something else, such as a friend or a pet, add `type:text` to turn the hint off.
+
+`type:email` also turns on the browser's email check, which blocks values such as `john at gmail`, two addresses, `Jane <jane@example.com>` or `none`, and in some browsers non-ASCII characters before the `@`. An optional field can still be empty. The server doesn't check the format, and fields without `type:email` accept any text.
+
+On a newsletter form, keep the word `email` in the label. Subscriber capture finds the address by the label, so `type:email` alone, or a label like `E-mail` or `Courriel`, doesn't create a subscriber.
+
+Errors
+
+With JavaScript on, if sending fails the message appears below the form and receives keyboard focus, unless the visitor has moved on to something outside the form. The entries stay in place so the visitor can try again.
 
 Success message
 
