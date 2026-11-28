@@ -239,6 +239,7 @@ export const DEPLOY_TOKEN_TOOLS: ReadonlySet<string> = new Set([
   "whoami",
   "get_project",
   "get_page_source",
+  "check_page",
   "save_page",
   "upload_asset",
   "publish_build",

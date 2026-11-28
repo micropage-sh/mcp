@@ -226,6 +226,10 @@ describe("deploy-token allowlist", () => {
     expect(() => assertDeployTokenAllows(pinned, "publish_post")).toThrow(/not available with a deploy token/);
   });
 
+  it("allows the read-only check_page", () => {
+    expect(() => assertDeployTokenAllows(pinned, "check_page")).not.toThrow();
+  });
+
   it("rejects other projects and allows the pinned one", () => {
     expect(() => assertDeployTokenAllows(pinned, "publish_build", "22222222-2222-2222-2222-222222222222")).toThrow(
       /pinned to project/,

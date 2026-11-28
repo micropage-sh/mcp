@@ -6,7 +6,7 @@ import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type 
 import { CNAME_TARGET, platformDomains } from "../client/config.js";
 import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
-import { concatPagesWithMap } from "../client/pages.js";
+import { checkPageSource, concatPagesWithMap, mapDiagnostics } from "../client/pages.js";
 import {
   PROJECT_COLUMNS,
   ProjectRef,
@@ -533,6 +533,53 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
 }
 
 // ---------------------------------------------------------------------------
+// check_page
+// ---------------------------------------------------------------------------
+
+export const CheckPageInput = z
+  .object({
+    project: ProjectRef,
+    pages: SavePageInput.shape.pages,
+  })
+  .strict();
+
+export const CheckPageOutput = z.object({
+  project: ProjectSummary,
+  diagnostics: z
+    .array(SaveDiagnostic)
+    .describe("Line-level compiler findings, as save_page returns them. Each fix replaces one line of the named file."),
+  counts: z.object({ error: z.number(), warning: z.number(), hint: z.number() }),
+  truncated: z.boolean().describe("True when the compiler capped the list; fix these and check again to see the rest."),
+  clean: z.boolean().describe("True when there are no errors and no warnings (hints may remain)."),
+  next: z.string(),
+});
+export type CheckPageResult = z.infer<typeof CheckPageOutput>;
+
+export async function runCheckPage(ctx: ToolContext, args: z.infer<typeof CheckPageInput>): Promise<CheckPageResult> {
+  const { text, map } = concatPagesWithMap(args.pages);
+  await gateTool(ctx, "check_page");
+  const project = await resolveProject(ctx, args.project);
+
+  const raw = await checkPageSource(ctx.http, ctx.config, { text, projectId: project.id });
+  const diagnostics = mapDiagnostics(raw, map);
+  const counts = countDiagnostics(diagnostics);
+  const truncated = diagnostics.some((d) => d.code === "too-many-diagnostics");
+  const mustFix = counts.error + counts.warning;
+  const clean = mustFix === 0;
+
+  return {
+    project: summarize(project),
+    diagnostics,
+    counts,
+    truncated,
+    clean,
+    next: clean
+      ? "No errors or warnings. Nothing was saved: call save_page to store this source as a draft."
+      : `Fix the ${mustFix} error(s) and warning(s) in diagnostics and check again, or save_page once they are fixed. Nothing was saved.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // delete_project (registered only with MICROPAGE_MCP_ALLOW_DELETE=1)
 // ---------------------------------------------------------------------------
 
@@ -710,7 +757,7 @@ It does not write local files (it is not \`micropage projects create\`) and cann
 
 Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file), line-level diagnostics (file, line, severity, message and an optional one-line fix; fix errors and warnings, then save again) and the editor URL where the user can preview the draft; drafts have no public URL.
 
-Images are not uploaded here: call upload_asset first, then reference the file with \`img: <- filename\`. Call get_markup_reference before writing markup you are unsure of. Saving also registers the source's forms on the project.`,
+Images are not uploaded here: call upload_asset first, then reference the file with \`img: <- filename\`. Call get_markup_reference before writing markup you are unsure of, and check_page to see diagnostics without saving. Saving also registers the source's forms on the project.`,
       inputSchema: SavePageInput,
       outputSchema: SavePageOutput,
       // Overwrites the active draft (or failed build) in place.
@@ -723,6 +770,29 @@ Images are not uploaded here: call upload_asset first, then reference the file w
         result,
         `${verb} draft v${result.build.number ?? "?"} (id ${result.build.id}); not live.` +
           (result.issues.length > 0 ? ` ${result.issues.length} issue(s) to fix.` : "") +
+          diagnosticsSummary(result.diagnostics),
+      );
+    },
+  );
+
+  server.registerTool(
+    "check_page",
+    {
+      title: "Check .page source without saving",
+      description: `Check .page markup for problems without saving anything: returns the same line-level diagnostics save_page would (file, line, severity, message and an optional one-line fix), plus counts and clean (no errors and no warnings).
+
+Pass the whole site source exactly as for save_page (pages: [{ name: "landing.page", content }], extra .page files merged after it by name). Use it to validate a draft before saving, or to iterate on fixes cheaply.
+
+Read-only: it never saves a build, never registers forms and never fetches remote images, so an image URL or search keyword is not verified here. A file name that is not uploaded to the project is reported. Call save_page to store the source as a draft.`,
+      inputSchema: CheckPageInput,
+      outputSchema: CheckPageOutput,
+      annotations: RO,
+    },
+    async (args) => {
+      const result = await runCheckPage(ctx, args);
+      return structuredResult(
+        result,
+        (result.clean ? "No errors or warnings; nothing saved." : "Problems found; nothing saved.") +
           diagnosticsSummary(result.diagnostics),
       );
     },

@@ -70,7 +70,7 @@ describe("server on remote-shaped deps", () => {
   it("serves the stdio tool set, with upload_asset offering only {url} and {base64}", async () => {
     const c = await connect(remoteDeps(createFakeFetch()));
     const { tools } = await c.listTools();
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(21);
     const upload = tools.find((t) => t.name === "upload_asset")!;
     const schema = JSON.stringify(upload.inputSchema);
     expect(schema).toContain('"url"');

@@ -196,6 +196,52 @@ export async function parsePageSource(
   return { json: rest, diagnostics: Array.isArray(diagnostics) ? (diagnostics as RawDiagnostic[]) : null };
 }
 
+/**
+ * POST {buildCompilerUrl}/check with the user's bearer. Read-only on the
+ * server: no build, no form registration, no remote image fetch. Returns the
+ * raw diagnostics array; anything else in the response is ignored.
+ */
+export async function checkPageSource(
+  http: Http,
+  config: Pick<MicropageConfig, "buildCompilerUrl">,
+  req: { text: string; projectId: number },
+): Promise<unknown[]> {
+  const url = `${config.buildCompilerUrl.replace(/\/+$/, "")}/check`;
+  let json: unknown;
+  try {
+    json = await http.request("POST", url, { body: { text: req.text, project_id: req.projectId } });
+  } catch (err) {
+    if (err instanceof MicropageError && err.code === "HTTP") {
+      if (err.status === 404) {
+        throw new MicropageError(
+          "CHECK_UNAVAILABLE",
+          "The build compiler does not support checking yet. save_page also returns diagnostics; use it instead. Nothing was saved.",
+          { status: 404, data: err.data, cause: err },
+        );
+      }
+      if (err.status === 403) {
+        throw new MicropageError(
+          "PARSE_FORBIDDEN",
+          "The build compiler refused this project for the signed-in account (it does not own it). Nothing was saved.",
+          { status: 403, data: err.data, cause: err },
+        );
+      }
+      throw new MicropageError(
+        "CHECK_FAILED",
+        `The build compiler could not check the source: ${err.message}. Nothing was saved.`,
+        { ...(err.status === undefined ? {} : { status: err.status }), data: err.data, cause: err },
+      );
+    }
+    throw err;
+  }
+  const diagnostics =
+    json && typeof json === "object" && !Array.isArray(json) ? (json as { diagnostics?: unknown }).diagnostics : undefined;
+  if (!Array.isArray(diagnostics)) {
+    throw new MicropageError("CHECK_FAILED", "The build compiler returned an unexpected response. Retry shortly. Nothing was saved.");
+  }
+  return diagnostics;
+}
+
 /** The compiler caps at 50 plus one "more not shown" summary. */
 export const MAX_DIAGNOSTICS = 51;
 

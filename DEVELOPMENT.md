@@ -79,7 +79,8 @@ anything:
 - leave `MICROPAGE_MCP_ALLOW_SEND`, `MICROPAGE_MCP_ALLOW_DELETE` and
   `MICROPAGE_MCP_SUBMISSIONS` unset, so no email, delete or PII tools exist;
 - call only read-only tools (`readOnlyHint: true`), for example `whoami`,
-  `list_projects`, `get_page_source`, `list_builds`, `get_markup_reference`;
+  `list_projects`, `get_page_source`, `check_page`, `list_builds`,
+  `get_markup_reference`;
 - use your own account, never a customer's session.
 
 ```bash

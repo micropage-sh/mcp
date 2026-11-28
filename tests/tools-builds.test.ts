@@ -13,7 +13,8 @@ import { tempConfig, tokenFor, type TempConfig } from "./helpers/session.js";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
 const PARSE_URL = "https://build-compiler.micropage.sh/parse";
-const UNIT_B_TOOLS = ["get_page_source", "create_project", "save_page", "publish_build", "get_deploy_status", "list_builds"];
+const CHECK_URL = "https://build-compiler.micropage.sh/check";
+const UNIT_B_TOOLS = ["get_page_source", "create_project", "check_page", "save_page", "publish_build", "get_deploy_status", "list_builds"];
 
 let cfg: TempConfig;
 let client: Client | undefined;
@@ -70,6 +71,7 @@ interface Backend {
   onStatusPoll?: (b: Backend, pollIndex: number) => void;
   statusPolls: number;
   parse: (call: RecordedCall) => { status?: number; body: unknown };
+  check: (call: RecordedCall) => { status?: number; body: unknown };
   deleteStatus?: number;
   /** Runs before each PATCH of builds is applied, to simulate another writer. */
   beforeBuildPatch?: (b: Backend) => void;
@@ -107,6 +109,7 @@ function backend(overrides: Partial<Backend> = {}): Backend {
     statusPolls: 0,
     projectPatches: 0,
     parse: () => ({ body: { site: { title: "New" }, pages: [{ meta: {}, body: [] }] } }),
+    check: () => ({ body: { diagnostics: [] } }),
     ...overrides,
   };
 }
@@ -145,6 +148,7 @@ function serve(b: Backend): FakeFetch {
   const fake = createFakeFetch();
   const responder = (call: RecordedCall) => {
     if (call.url === PARSE_URL) return b.parse(call);
+    if (call.url === CHECK_URL) return b.check(call);
     const url = new URL(call.url);
     const q = url.searchParams;
     const key = `${call.method} ${url.pathname}`;
@@ -267,7 +271,7 @@ async function connect(
 }
 
 const text = (res: { content?: unknown }) => JSON.stringify(res.content);
-const path = (c: RecordedCall) => (c.url === PARSE_URL ? "parse" : new URL(c.url).pathname);
+const path = (c: RecordedCall) => (c.url === PARSE_URL ? "parse" : c.url === CHECK_URL ? "check" : new URL(c.url).pathname);
 const writes = (fake: FakeFetch) => fake.calls.filter((c) => c.method !== "GET" && path(c) !== "parse");
 const callsTo = (fake: FakeFetch, method: string, p: string) =>
   fake.calls.filter((c) => c.method === method && path(c) === p);
@@ -296,6 +300,7 @@ describe("registration", () => {
     expect(byName.has("delete_project")).toBe(false);
 
     expect(byName.get("get_page_source")!.annotations).toMatchObject(RO);
+    expect(byName.get("check_page")!.annotations).toEqual(RO);
     expect(byName.get("list_builds")!.annotations).toMatchObject(RO);
     expect(byName.get("get_deploy_status")!.annotations).toMatchObject(RO);
     expect(byName.get("create_project")!.annotations).toMatchObject(WRITE);
@@ -321,6 +326,132 @@ describe("registration", () => {
     expect(del).toBeDefined();
     expect(del!.annotations).toMatchObject(OUT);
     expect((del!.inputSchema as { additionalProperties?: unknown }).additionalProperties).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("check_page", () => {
+  const pages = [
+    { name: "landing.page", content: "\n[Home -> /]\nimg: <- a.png\n" },
+    { name: "b.page", content: "[B -> /b]\n/// section\nbuton: Go -> /x" },
+  ];
+  const nonCheckCalls = (fake: FakeFetch) => fake.calls.filter((c) => c.method !== "GET" && path(c) !== "check");
+
+  it("posts the merged source to /check without local_files, maps diagnostics and never writes", async () => {
+    const b = backend({
+      check: () => ({
+        body: {
+          diagnostics: [
+            { line: 2, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+            { line: 6, column: 1, severity: "hint", code: "unknown-tag", message: "Unknown tag buton:", fix: { line: 6, replace: "button: Go -> /x" } },
+            { severity: "error", code: "dropped-block", message: "1 line dropped" },
+          ],
+        },
+      }),
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "check_page", arguments: { project: UUID, pages } });
+    expect(res.isError, text(res)).toBeFalsy();
+
+    const check = callsTo(fake, "POST", "check");
+    expect(check).toHaveLength(1);
+    expect(check[0]!.headers.authorization).toMatch(/^Bearer /);
+    expect(check[0]!.body).toEqual({
+      text: "[Home -> /]\nimg: <- a.png\n\n[B -> /b]\n/// section\nbuton: Go -> /x",
+      project_id: 7,
+    });
+    expect(callsTo(fake, "POST", "parse")).toHaveLength(0);
+    expect(nonCheckCalls(fake)).toHaveLength(0);
+    expect(b.activeBuildId).toBe(30);
+
+    expect(res.structuredContent).toEqual({
+      project: expect.objectContaining({ id: 7, uuid: UUID, active_build_id: 30 }),
+      diagnostics: [
+        { file: "landing.page", line: 3, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+        {
+          file: "b.page",
+          line: 3,
+          column: 1,
+          severity: "hint",
+          code: "unknown-tag",
+          message: "Unknown tag buton:",
+          fix: { file: "b.page", line: 3, replace: "button: Go -> /x" },
+        },
+        { severity: "error", code: "dropped-block", message: "1 line dropped" },
+      ],
+      counts: { error: 1, warning: 1, hint: 1 },
+      truncated: false,
+      clean: false,
+      next: expect.stringMatching(/Fix the 2 error\(s\) and warning\(s\).*Nothing was saved/),
+    });
+    expect(text(res)).toMatch(/Problems found; nothing saved\. Diagnostics: 1 error\(s\), 1 warning\(s\), 1 hint\(s\)\./);
+  });
+
+  it("is clean with only hints, and flags a capped list as truncated", async () => {
+    const b = backend({
+      check: () => ({
+        body: {
+          diagnostics: [
+            { line: 1, severity: "hint", code: "unknown-tag", message: "m" },
+            { severity: "hint", code: "too-many-diagnostics", message: "4 more not shown" },
+          ],
+        },
+      }),
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "check_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ counts: { error: 0, warning: 0, hint: 1 }, truncated: true, clean: true });
+    expect((res.structuredContent as { next: string }).next).toMatch(/save_page/);
+  });
+
+  it("reports no diagnostics as clean", async () => {
+    const c = await connect(serve(backend()));
+    const res = await c.callTool({ name: "check_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.structuredContent).toMatchObject({ diagnostics: [], counts: { error: 0, warning: 0, hint: 0 }, truncated: false, clean: true });
+    expect((res.content as { text: string }[])[0]!.text.split("\n\n")[0]).toBe("No errors or warnings; nothing saved.");
+  });
+
+  it("maps 404 to CHECK_UNAVAILABLE pointing at save_page, 403 to forbidden and other failures to CHECK_FAILED", async () => {
+    const cases: [number, unknown, RegExp][] = [
+      [404, { error: "Not Found" }, /does not support checking yet\. save_page also returns diagnostics/],
+      [403, { error: "Forbidden" }, /refused this project for the signed-in account/],
+      [422, { error: "Too many table rows." }, /could not check the source: .*Too many table rows\./],
+      [500, { error: "boom" }, /could not check the source: .*HTTP 500/],
+    ];
+    for (const [status, body, re] of cases) {
+      const fake = serve(backend({ check: () => ({ status, body }) }));
+      const c = await connect(fake);
+      const res = await c.callTool({ name: "check_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+      expect(res.isError, String(status)).toBe(true);
+      expect(text(res), String(status)).toMatch(re);
+      expect(nonCheckCalls(fake), String(status)).toHaveLength(0);
+      await client?.close();
+      client = undefined;
+    }
+  });
+
+  it("refuses a response without a diagnostics array", async () => {
+    const c = await connect(serve(backend({ check: () => ({ body: { site: {}, pages: [] } }) })));
+    const res = await c.callTool({ name: "check_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/unexpected response/);
+  });
+
+  it("rejects bad page names and extra keys before any network call", async () => {
+    const fake = serve(backend());
+    const c = await connect(fake);
+    for (const args of [
+      { project: UUID, pages: [{ name: "landing.txt", content: "x" }] },
+      { project: UUID, pages: [{ name: "a.page", content: "x" }, { name: "a.page", content: "y" }] },
+      { project: UUID, pages: [{ name: "landing.page", content: "x" }], llms_txt: "x" },
+    ]) {
+      const res = await c.callTool({ name: "check_page", arguments: args });
+      expect(res.isError, JSON.stringify(args)).toBe(true);
+    }
+    expect(fake.calls).toHaveLength(0);
   });
 });
 

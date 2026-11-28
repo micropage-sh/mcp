@@ -378,10 +378,10 @@ describe("authentication", () => {
 });
 
 describe("serving", () => {
-  it("round-trips tools/list with a valid token: 20 tools, upload_asset without {path}", async () => {
+  it("round-trips tools/list with a valid token: 21 tools, upload_asset without {path}", async () => {
     const c = await connect(oauthToken("user-a"));
     const { tools } = await c.listTools();
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(21);
     const upload = tools.find((t) => t.name === "upload_asset")!;
     expect(JSON.stringify(upload.inputSchema)).not.toContain('"path"');
     expect(tools.map((t) => t.name)).not.toContain("delete_project");
