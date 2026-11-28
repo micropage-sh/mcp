@@ -61,7 +61,7 @@ Elements:
 - `- item` (unordered) / `1. item` (ordered; starts at the first number) — one item per line, consecutive lines form one list; a blank line or switching `-`/`1.` starts a new list; no nesting, plain text; works in sections, columns, footer. Use `p:` for a paragraph starting with `- ` or `2024. `
 - `table: Caption` (optional) then `| A | B |` rows — first row is the header; `|---|` separator optional; plain-text cells; `\|` is a literal pipe
 - `icon: bi bi-name` (Bootstrap Icons)
-- `img: Description <- filename.png` (the words before `<-` become the alt text), `img: alt: text <- filename.png` (explicit, wins if both are present) or `img: <- filename.png` (empty alt)
+- `img: Description <- filename.png` (the words before `<-` become the alt text), `img: alt: text <- filename.png` (explicit, wins if both are present) or `img: alt: "" <- filename.png` (decorative, empty alt). `img: <- filename.png` and a bare `alt:` also give an empty alt but are reported as missing alt text
 - `button: Label -> url`
 - `btn-secondary: Label -> url`
 - `btn-outline: Label -> url`
@@ -106,7 +106,8 @@ Images and file links: `<- filename` resolves a file uploaded to the project (no
 - Keep structure stable across edits. Change copy and order before inventing new sections.
 - Do not wrap the file in markdown fences when writing it back.
 - Keyboard focus: theme controls, `link:` lines and underlined links in text get the theme's focus ring. Other Bootstrap components in raw HTML (`accordion-button`, `page-link`, `btn-close`, `btn-check`, `form-range`, `form-control-plaintext`, `focus-ring`, carousel controls) can have no outline, so add a `:focus-visible` outline for any you use. Tab and Shift+Tab show the focused element below a header pinned to the top (JavaScript only; not on scroll-snapping pages, on pages that scroll inside `body` or a wrapper, or inside your own sticky or fixed elements; untested in Safari). Focus inside an iframe can land under the header, and so can tabbing out of one. Anchor targets are not moved: if one lands under the header, put `scroll-margin-top` on that target. Don't add `scroll-padding` on `html`: in Chromium it makes the page jump when focus moves into the sticky header.
-- Describe every image before `<-`: those words become its alt text. What the generated HTML does for accessibility: https://docs.micropage.sh/docs/concepts/accessibility/
+- Describe every image before `<-`: those words become its alt text. Use `alt: ""` only for decorative images. What the generated HTML does for accessibility: https://docs.micropage.sh/docs/concepts/accessibility/
+- Saving through the CLI or `save_page` returns parser diagnostics (error, warning, hint) with line numbers and sometimes a one-line `fix`. Fix errors and warnings before publishing; `--strict` makes the CLI fail on them. Codes: https://docs.micropage.sh/docs/concepts/diagnostics/
 - Do not emit React, Tailwind class soup, or custom components.
 - After edits, the human publishes from the web app (Publish) or `micropage publish` (Pro CLI). Agents connected through the Micropage MCP server (`@micropage-sh/mcp`, Pro) save drafts with `save_page` and call `publish_build` only when the user asks: https://docs.micropage.sh/docs/mcp/overview/
 
@@ -211,7 +212,7 @@ img: <- hero.png
 
 Upload the file in the Files tab, then reference it by its exact filename. Filenames are case-sensitive. With the CLI, anything in the project's `assets/` folder is uploaded on push.
 
-The words before `<-` become the alt text: `img: Our team at the meetup <- team.jpg`. With nothing before `<-`, the alt is empty.
+The words before `<-` become the alt text: `img: Our team at the meetup <- team.jpg`. For a decorative image, write `img: alt: "" <- divider.png`. With nothing before `<-`, the alt is empty and the CLI and MCP server report a missing-alt warning.
 
 Two other forms exist, mostly for a first draft:
 

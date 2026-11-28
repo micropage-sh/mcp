@@ -28,7 +28,7 @@ col:
 /// hero
 h1: Track the habits that matter
 p: PocketTrack is a simple mobile app that helps you log habits, see progress, and stay motivated.
-img: <- mobile-dashboard
+img: The PocketTrack app showing a week of habits <- mobile-dashboard
 button: Download for iOS -> /download
 button: Download for Android -> /download
 

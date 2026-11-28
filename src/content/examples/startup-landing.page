@@ -29,7 +29,7 @@ col:
 /// hero
 h1: Ship a polished site in minutes
 p: Launchpad gives you a fast, opinionated starting point for SaaS landing pages.
-img: aspect:16x9 <- product-dashboard
+img: Product dashboard with charts aspect:16x9 <- product-dashboard
 button: Get started -> /pricing
 button: View docs -> https://docs.micropage.sh
 

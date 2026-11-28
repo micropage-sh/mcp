@@ -65,7 +65,7 @@ h2: Center-aligned columns
 p: Use align:center for image-and-text split layouts where vertical centering looks intentional.
 
 col:
-  img: <- workspace
+  img: A tidy desk with a laptop and notebook <- workspace
 
 col:
   h3: Paired with image

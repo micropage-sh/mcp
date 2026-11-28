@@ -13,7 +13,7 @@ Home -> /
 h2: Pricing table (three tiers)
 
 col:
-  img: <- pricing-cards
+  img: Pricing plan cards side by side <- pricing-cards
   h3: Starter
   p: For small experiments and side projects.
   p: 1 project, basic assets, 100 form submissions.
