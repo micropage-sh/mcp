@@ -6,7 +6,7 @@ import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type 
 import { CNAME_TARGET, platformDomains } from "../client/config.js";
 import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
-import { concatPages } from "../client/pages.js";
+import { concatPagesWithMap, type MappedDiagnostic } from "../client/pages.js";
 import {
   PROJECT_COLUMNS,
   ProjectRef,
@@ -441,6 +441,24 @@ export const SavePageInput = z
   })
   .strict();
 
+const DiagnosticFile = z.string().describe("The .page file; omitted when the line falls outside every file (then the line counts in the merged source).");
+
+export const SaveDiagnostic = z.object({
+  file: DiagnosticFile.optional(),
+  line: z.number().int().optional().describe("1-based line in `file`."),
+  column: z.number().int().optional(),
+  severity: z.enum(["error", "warning", "hint"]),
+  code: z.string().describe("Stable id such as missing-alt or unknown-tag; new codes may appear."),
+  message: z.string(),
+  fix: z
+    .object({
+      file: z.string().describe("The .page file the fix applies to."),
+      line: z.number().int().describe("The line to replace; use this, not the diagnostic's line."),
+      replace: z.string().describe("The full new text of that one line."),
+    })
+    .optional(),
+});
+
 export const SavePageOutput = z.object({
   project: ProjectSummary,
   build: z.object({
@@ -455,6 +473,13 @@ export const SavePageOutput = z.object({
   issues: z
     .array(z.string())
     .describe("Problems the compiler flagged, e.g. a referenced file that does not exist. Fix them before publishing."),
+  diagnostics: z
+    .array(SaveDiagnostic)
+    .nullable()
+    .describe(
+      "Line-level compiler findings. null = the compiler did not report diagnostics. Fix errors and warnings before " +
+        "publishing; hints are suggestions. Each fix replaces one line of the named file.",
+    ),
   page_count: z.number(),
   llms_txt: z.enum(["kept", "set", "removed", "none"]),
   live: z.literal(false).describe("Always false: save_page never changes the live site; the draft goes live only with publish_build."),
@@ -465,7 +490,7 @@ export const SavePageOutput = z.object({
 export type SavePageResult = z.infer<typeof SavePageOutput>;
 
 export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePageInput>): Promise<SavePageResult> {
-  const text = concatPages(args.pages);
+  const { text, map } = concatPagesWithMap(args.pages);
   await gateTool(ctx, "save_page");
   const project = await resolveProject(ctx, args.project);
 
@@ -473,8 +498,11 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
     projectId: project.id,
     activeBuildId: project.active_build_id,
     text,
+    sourceMap: map,
     llmsTxt: args.llms_txt,
   });
+  const counts = countDiagnostics(saved.diagnostics);
+  const mustFix = counts.error + counts.warning;
 
   return {
     project: summarize({ ...project, active_build_id: saved.build.id }),
@@ -482,6 +510,7 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
     action: saved.action,
     previous_active_build_id: saved.previous_active_build_id,
     issues: saved.issues,
+    diagnostics: saved.diagnostics,
     page_count: saved.page_count,
     llms_txt: saved.llms_txt,
     live: false,
@@ -490,8 +519,27 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
     next:
       "Saved as a draft: it never goes live until publish_build. Show the user the preview_url" +
       (saved.issues.length > 0 ? " and fix the issues listed" : "") +
+      (mustFix > 0 ? `, fix the ${mustFix} error(s) and warning(s) in diagnostics, then save_page again` : "") +
       `, and call publish_build (build "id:${saved.build.id}", confirm: true) only when the user asks to publish.`,
   };
+}
+
+type SeverityAndCode = Pick<MappedDiagnostic, "severity" | "code">;
+
+/** Per-severity counts, leaving out the compiler's "more not shown" summary entry. */
+function countDiagnostics(diagnostics: readonly SeverityAndCode[] | null): Record<MappedDiagnostic["severity"], number> {
+  const counts = { error: 0, warning: 0, hint: 0 };
+  for (const d of diagnostics ?? []) if (d.code !== "too-many-diagnostics") counts[d.severity]++;
+  return counts;
+}
+
+/** " Diagnostics: 2 error(s), 1 hint(s)." for the text summary; "" when there are none or none were reported. */
+function diagnosticsSummary(diagnostics: readonly SeverityAndCode[] | null): string {
+  const c = countDiagnostics(diagnostics);
+  const parts = (["error", "warning", "hint"] as const).filter((k) => c[k] > 0).map((k) => `${c[k]} ${k}(s)`);
+  if (parts.length === 0) return "";
+  const more = diagnostics?.some((d) => d.code === "too-many-diagnostics") ? ", more not shown" : "";
+  return ` Diagnostics: ${parts.join(", ")}${more}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -670,7 +718,7 @@ It does not write local files (it is not \`micropage projects create\`) and cann
       title: "Save .page source as a draft",
       description: `Compile .page markup and save it as the project's draft build. It never goes live until publish_build deploys it: call publish_build only when the user asks. Post changes rebuild the live site, not this draft.
 
-Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file) and the editor URL where the user can preview the draft; drafts have no public URL.
+Pass the whole site source each time (pages: [{ name: "landing.page", content }], extra .page files are merged after it by name). If the project's active build is a draft or a failed build it is overwritten; otherwise a new draft is created and made active. Returns the build id and number, compiler issues (such as a missing image file), line-level diagnostics (file, line, severity, message and an optional one-line fix; fix errors and warnings, then save again) and the editor URL where the user can preview the draft; drafts have no public URL.
 
 Images are not uploaded here: call upload_asset first, then reference the file with \`img: <- filename\`. Call get_markup_reference before writing markup you are unsure of. Saving also registers the source's forms on the project.`,
       inputSchema: SavePageInput,
@@ -684,7 +732,8 @@ Images are not uploaded here: call upload_asset first, then reference the file w
       return structuredResult(
         result,
         `${verb} draft v${result.build.number ?? "?"} (id ${result.build.id}); not live.` +
-          (result.issues.length > 0 ? ` ${result.issues.length} issue(s) to fix.` : ""),
+          (result.issues.length > 0 ? ` ${result.issues.length} issue(s) to fix.` : "") +
+          diagnosticsSummary(result.diagnostics),
       );
     },
   );

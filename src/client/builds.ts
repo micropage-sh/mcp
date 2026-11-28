@@ -7,8 +7,11 @@ import {
   collectParseIssues,
   countPages,
   injectLlmsTxt,
+  mapDiagnostics,
   normalizeLlmsTxt,
   parsePageSource,
+  type MappedDiagnostic,
+  type PageSourceMap,
 } from "./pages.js";
 
 /** Values of the builds.status enum that mean a publish is under way. */
@@ -148,8 +151,10 @@ interface ActiveBuildRow {
 export interface SaveDraftInput {
   projectId: number;
   activeBuildId: number | null;
-  /** Merged .page source (concatPages). */
+  /** Merged .page source (concatPagesWithMap). */
   text: string;
+  /** Maps the compiler's merged-source lines back to the .page files. */
+  sourceMap: PageSourceMap;
   /** undefined keeps the active build's llms.txt; "" removes it; anything else replaces it. */
   llmsTxt?: string | undefined;
 }
@@ -160,6 +165,8 @@ export interface SaveDraftResult {
   /** The build this one replaced as active, when a new draft was created. */
   previous_active_build_id: number | null;
   issues: string[];
+  /** null when the compiler did not report diagnostics. */
+  diagnostics: MappedDiagnostic[] | null;
   page_count: number;
   llms_txt: "kept" | "set" | "removed" | "none";
 }
@@ -202,12 +209,17 @@ export async function saveDraft(
 
   const compile = async (buildId: number) => {
     const parsed = await parsePageSource(http, config, { text: input.text, projectId: input.projectId, buildId });
-    const json = injectLlmsTxt(parsed, llms);
-    return { json, issues: collectParseIssues(json), page_count: countPages(json) };
+    const json = injectLlmsTxt(parsed.json, llms);
+    return {
+      json,
+      issues: collectParseIssues(json),
+      diagnostics: parsed.diagnostics === null ? null : mapDiagnostics(parsed.diagnostics, input.sourceMap),
+      page_count: countPages(json),
+    };
   };
 
   if (reuse) {
-    const { json, issues, page_count } = await compile(active.id);
+    const { json, issues, diagnostics, page_count } = await compile(active.id);
     const current = await getBuildById<{ id: number; status: string | null }>(http, input.projectId, active.id, "id,status");
     if (!current || !isEditable(current.status)) throw draftMoved(active.number, current?.status ?? "deleted");
 
@@ -223,6 +235,7 @@ export async function saveDraft(
       action: "updated_draft",
       previous_active_build_id: null,
       issues,
+      diagnostics,
       page_count,
       llms_txt: llmsState,
     };
@@ -236,7 +249,7 @@ export async function saveDraft(
     (await claimEmptyDraft(http, input.projectId, input.activeBuildId, input.text)) ??
     (await insertDraft(http, input.projectId, input.text));
 
-  const { json, issues, page_count } = await compile(created.id).catch((err: unknown) => {
+  const { json, issues, diagnostics, page_count } = await compile(created.id).catch((err: unknown) => {
     rememberLeftover(input.projectId, created.id);
     throw uncompiledDraft(err, created);
   });
@@ -260,6 +273,7 @@ export async function saveDraft(
     action: "created_draft",
     previous_active_build_id: input.activeBuildId,
     issues,
+    diagnostics,
     page_count,
     llms_txt: llmsState,
   };

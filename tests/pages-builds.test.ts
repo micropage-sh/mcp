@@ -2,7 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { parseBuildRef } from "../src/client/builds.js";
 import { formatDeployEvent, pollDeployStatus, type Clock } from "../src/client/deploy-events.js";
-import { MAX_SOURCE_BYTES, collectParseIssues, concatPages, injectLlmsTxt, normalizeLlmsTxt } from "../src/client/pages.js";
+import {
+  MAX_SOURCE_BYTES,
+  collectParseIssues,
+  concatPages,
+  concatPagesWithMap,
+  injectLlmsTxt,
+  mapDiagnostics,
+  mapLine,
+  normalizeLlmsTxt,
+  parsePageSource,
+  type PageFile,
+} from "../src/client/pages.js";
 import { createFakeFetch, makeHttp, type RecordedCall } from "./helpers/fake-fetch.js";
 
 describe("concatPages", () => {
@@ -30,6 +41,168 @@ describe("concatPages", () => {
     expect(() => concatPages([{ name: "a.page", content: "x" }, { name: "a.page", content: "y" }])).toThrow(/twice/);
     expect(() => concatPages([{ name: "a.page", content: " " }])).toThrow(/empty/);
     expect(() => concatPages([{ name: "a.page", content: "x".repeat(MAX_SOURCE_BYTES + 1) }])).toThrow(/limit/);
+  });
+});
+
+/** Every merged line maps back to the same text in its file; separators map to null. */
+function expectRoundTrip(pages: PageFile[]): void {
+  const { text, map } = concatPagesWithMap(pages);
+  expect(text).toBe(concatPages(pages));
+  const merged = text.split("\n");
+  const byName = new Map(pages.map((p) => [p.name, p.content.split("\n")]));
+  merged.forEach((line, i) => {
+    const at = mapLine(map, i + 1);
+    if (at === null) {
+      expect(line, `merged line ${i + 1}`).toBe("");
+      return;
+    }
+    const fileLines = byName.get(at.file)!;
+    expect(fileLines[at.line - 1]!.trim(), `merged line ${i + 1} -> ${at.file}:${at.line}`).toBe(line.trim());
+  });
+  expect(mapLine(map, merged.length + 1)).toBeNull();
+  expect(mapLine(map, 0)).toBeNull();
+}
+
+describe("concatPagesWithMap", () => {
+  it("maps merged lines to file lines, mirroring the CLI's merge", () => {
+    const pages = [
+      { name: "zeta.page", content: "Z1\nZ2\n" },
+      { name: "landing.page", content: "\n\nL1\nL2\n\n" },
+      { name: "about.page", content: "\n\n\nA1\n\nA3" },
+      { name: "blank.page", content: " \n " },
+    ];
+    const { text, map } = concatPagesWithMap(pages);
+    expect(text).toBe("L1\nL2\n\nA1\n\nA3\n\nZ1\nZ2");
+    expect(map.files).toEqual([
+      { name: "landing.page", startLine: 1, lineCount: 2, leadingLines: 2 },
+      { name: "about.page", startLine: 4, lineCount: 3, leadingLines: 3 },
+      { name: "zeta.page", startLine: 8, lineCount: 2, leadingLines: 0 },
+    ]);
+    expect(mapLine(map, 1)).toEqual({ file: "landing.page", line: 3 });
+    expect(mapLine(map, 3)).toBeNull();
+    expect(mapLine(map, 4)).toEqual({ file: "about.page", line: 4 });
+    expect(mapLine(map, 6)).toEqual({ file: "about.page", line: 6 });
+    expect(mapLine(map, 9)).toEqual({ file: "zeta.page", line: 2 });
+    expectRoundTrip(pages);
+  });
+
+  it("keeps an empty landing.page as one line and skips other empty files", () => {
+    const pages = [
+      { name: "landing.page", content: "  \n\n" },
+      { name: "a.page", content: "\n" },
+      { name: "b.page", content: "B" },
+    ];
+    const { text, map } = concatPagesWithMap(pages);
+    expect(text).toBe("\n\nB");
+    expect(map.files).toEqual([
+      { name: "landing.page", startLine: 1, lineCount: 1, leadingLines: 0 },
+      { name: "b.page", startLine: 3, lineCount: 1, leadingLines: 0 },
+    ]);
+    expect(mapLine(map, 2)).toBeNull();
+    expect(mapLine(map, 3)).toEqual({ file: "b.page", line: 1 });
+  });
+
+  it("counts a BOM and CRLF leading lines like the trim does", () => {
+    const pages = [
+      { name: "landing.page", content: "\uFEFF\r\n\r\n[site]\r\ntitle: A\r\n" },
+      { name: "x.page", content: "\r\n[X -> /x]\r\n/// section\r\np: x\r\n" },
+    ];
+    const { map } = concatPagesWithMap(pages);
+    expect(mapLine(map, 1)).toEqual({ file: "landing.page", line: 3 });
+    expect(mapLine(map, 2)).toEqual({ file: "landing.page", line: 4 });
+    expect(mapLine(map, 3)).toBeNull();
+    expect(mapLine(map, 4)).toEqual({ file: "x.page", line: 2 });
+    expect(mapLine(map, 6)).toEqual({ file: "x.page", line: 4 });
+    expectRoundTrip(pages);
+  });
+
+  it("validates exactly like concatPages", () => {
+    expect(() => concatPagesWithMap([])).toThrow(/at least one page/);
+    expect(() => concatPagesWithMap([{ name: "../a.page", content: "x" }])).toThrow(/not valid/);
+    expect(() => concatPagesWithMap([{ name: "a.page", content: "\n " }])).toThrow(/empty/);
+  });
+});
+
+describe("mapDiagnostics", () => {
+  const { map } = concatPagesWithMap([
+    { name: "landing.page", content: "\n[Home -> /]\n/// section\nimg: <- a.png" },
+    { name: "b.page", content: "[B -> /b]\n/// section\nbuton: Go -> /x" },
+  ]);
+
+  it("maps lines and fixes to files, keeping column, code and message", () => {
+    expect(
+      mapDiagnostics(
+        [
+          { line: 3, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+          { line: 7, column: 1, severity: "hint", code: "unknown-tag", message: "Did you mean button:?", fix: { line: 7, replace: "button: Go -> /x" } },
+          { severity: "hint", code: "too-many-diagnostics", message: "3 more not shown" },
+        ],
+        map,
+      ),
+    ).toEqual([
+      { file: "landing.page", line: 4, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+      {
+        file: "b.page",
+        line: 3,
+        column: 1,
+        severity: "hint",
+        code: "unknown-tag",
+        message: "Did you mean button:?",
+        fix: { file: "b.page", line: 3, replace: "button: Go -> /x" },
+      },
+      { severity: "hint", code: "too-many-diagnostics", message: "3 more not shown" },
+    ]);
+  });
+
+  it("reads unknown severities as hints, keeps merged lines it cannot map, drops unmappable fixes and drops malformed entries", () => {
+    expect(
+      mapDiagnostics(
+        [
+          { line: 4, severity: "fatal", code: "x", message: "on the separator" },
+          { line: 99, column: 2, severity: "error", code: "y", message: "past the end", fix: { line: 99, replace: "z" } },
+          { line: 0, column: 3, severity: "error", code: "z", message: "bad line" },
+          { severity: "error", code: "f", message: "bad fix", fix: { line: 1, replace: "a\nb" } },
+          { severity: "error", message: "no code" },
+          null,
+          "text",
+          [],
+        ],
+        map,
+      ),
+    ).toEqual([
+      { line: 4, severity: "hint", code: "x", message: "on the separator" },
+      { line: 99, column: 2, severity: "error", code: "y", message: "past the end" },
+      { severity: "error", code: "z", message: "bad line" },
+      { severity: "error", code: "f", message: "bad fix" },
+    ]);
+  });
+
+  it("caps at 51 entries and clips long messages", () => {
+    const many = Array.from({ length: 80 }, (_, i) => ({ severity: "warning", code: "c", message: `m${i}` }));
+    expect(mapDiagnostics(many, map)).toHaveLength(51);
+    expect(mapDiagnostics([{ severity: "warning", code: "c", message: "x".repeat(1000) }], map)[0]!.message).toHaveLength(300);
+  });
+});
+
+describe("parsePageSource", () => {
+  const config = { buildCompilerUrl: "https://bc.test/" };
+
+  it("asks for diagnostics and detaches them from the build JSON", async () => {
+    const fake = createFakeFetch();
+    fake.push({ body: { site: {}, pages: [], manifest: {}, diagnostics: [{ severity: "hint", code: "c", message: "m" }] } });
+    const res = await parsePageSource(makeHttp(fake), config, { text: "x", projectId: 7, buildId: 30 });
+    expect(fake.calls[0]!.url).toBe("https://bc.test/parse");
+    expect(fake.calls[0]!.body).toEqual({ text: "x", project_id: 7, build_id: 30, version: "2", diagnostics: true });
+    expect(res).toEqual({ json: { site: {}, pages: [], manifest: {} }, diagnostics: [{ severity: "hint", code: "c", message: "m" }] });
+  });
+
+  it("returns null diagnostics when an older compiler sends none, or sends something else", async () => {
+    const fake = createFakeFetch();
+    fake.push({ body: { site: {}, pages: [] } });
+    fake.push({ body: { site: {}, pages: [], diagnostics: "nope" } });
+    const http = makeHttp(fake);
+    expect(await parsePageSource(http, config, { text: "x", projectId: 7, buildId: null })).toEqual({ json: { site: {}, pages: [] }, diagnostics: null });
+    expect(await parsePageSource(http, config, { text: "x", projectId: 7, buildId: null })).toEqual({ json: { site: {}, pages: [] }, diagnostics: null });
   });
 });
 

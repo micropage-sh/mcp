@@ -18,6 +18,27 @@ export interface PageFile {
 
 const PAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.page$/;
 
+/** Where one file's trimmed content sits in the merged source. */
+export interface PageMapEntry {
+  name: string;
+  /** 1-based merged line of the file's first kept line. */
+  startLine: number;
+  /** Lines of the trimmed content ("\n" count + 1). */
+  lineCount: number;
+  /** Lines dropped from the top of the file by the trim. */
+  leadingLines: number;
+}
+
+export interface PageSourceMap {
+  files: PageMapEntry[];
+}
+
+const countNewlines = (s: string): number => {
+  let n = 0;
+  for (let i = s.indexOf("\n"); i !== -1; i = s.indexOf("\n", i + 1)) n++;
+  return n;
+};
+
 /**
  * Merges inline page files exactly like the CLI's readPageFilesFromDir
  * (cli/src/parser.js): landing.page first (trimmed, kept even when empty),
@@ -25,6 +46,11 @@ const PAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.page$/;
  * by one blank line. Validates names and size before anything is sent.
  */
 export function concatPages(pages: readonly PageFile[]): string {
+  return concatPagesWithMap(pages).text;
+}
+
+/** concatPages plus the map from merged source lines back to file lines. */
+export function concatPagesWithMap(pages: readonly PageFile[]): { text: string; map: PageSourceMap } {
   if (pages.length === 0) {
     throw new MicropageError("INVALID_PAGES", "Pass at least one page, e.g. pages: [{ name: \"landing.page\", content: \"...\" }].");
   }
@@ -49,10 +75,20 @@ export function concatPages(pages: readonly PageFile[]): string {
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   const parts: string[] = [];
-  if (primary) parts.push(primary.content.trim());
+  const files: PageMapEntry[] = [];
+  let nextLine = 1;
+  const keep = (p: PageFile, content: string): void => {
+    const lineCount = countNewlines(content) + 1;
+    const leading = content ? p.content.slice(0, p.content.length - p.content.trimStart().length) : "";
+    files.push({ name: p.name, startLine: nextLine, lineCount, leadingLines: countNewlines(leading) });
+    parts.push(content);
+    // The "\n\n" join leaves one blank separator line between files.
+    nextLine += lineCount + 1;
+  };
+  if (primary) keep(primary, primary.content.trim());
   for (const p of others) {
     const content = p.content.trim();
-    if (content) parts.push(content);
+    if (content) keep(p, content);
   }
   const text = parts.join("\n\n");
 
@@ -66,7 +102,17 @@ export function concatPages(pages: readonly PageFile[]): string {
       `The merged source is ${bytes} bytes; the limit is ${MAX_SOURCE_BYTES}. Shorten the pages. Nothing was saved.`,
     );
   }
-  return text;
+  return { text, map: { files } };
+}
+
+/** The file and 1-based file line behind a merged source line; null for a separator line or past the end. */
+export function mapLine(map: PageSourceMap, line: number): { file: string; line: number } | null {
+  for (const f of map.files) {
+    if (line >= f.startLine && line < f.startLine + f.lineCount) {
+      return { file: f.name, line: line - f.startLine + 1 + f.leadingLines };
+    }
+  }
+  return null;
 }
 
 /** llms.txt as the CLI stores it: verbatim minus one trailing newline; blank means none. */
@@ -92,6 +138,25 @@ export interface ParseRequest {
   buildId: number | null;
 }
 
+export type DiagnosticSeverity = "error" | "warning" | "hint";
+
+/** One entry of the compiler's `diagnostics`, as sent: lines count in the merged source. */
+export interface RawDiagnostic {
+  line?: number;
+  column?: number;
+  severity: string;
+  code: string;
+  message: string;
+  fix?: { line: number; replace: string };
+}
+
+export interface ParseResult {
+  /** The build JSON without the `diagnostics` key, ready for json_content. */
+  json: BuildJson;
+  /** null when the compiler sent no `diagnostics` array (an older compiler). */
+  diagnostics: RawDiagnostic[] | null;
+}
+
 /**
  * POST {buildCompilerUrl}/parse with the user's bearer, same body as the CLI.
  * Not read-only: the compiler registers the source's forms on the project.
@@ -100,12 +165,12 @@ export async function parsePageSource(
   http: Http,
   config: Pick<MicropageConfig, "buildCompilerUrl">,
   req: ParseRequest,
-): Promise<BuildJson> {
+): Promise<ParseResult> {
   const url = `${config.buildCompilerUrl.replace(/\/+$/, "")}/parse`;
   let json: unknown;
   try {
     json = await http.request("POST", url, {
-      body: { text: req.text, project_id: req.projectId, build_id: req.buildId, version: "2" },
+      body: { text: req.text, project_id: req.projectId, build_id: req.buildId, version: "2", diagnostics: true },
     });
   } catch (err) {
     if (err instanceof MicropageError && err.code === "HTTP") {
@@ -127,7 +192,60 @@ export async function parsePageSource(
   if (!json || typeof json !== "object" || Array.isArray(json)) {
     throw new MicropageError("PARSE_FAILED", "The build compiler returned an unexpected response. Retry shortly. Nothing was saved.");
   }
-  return json as BuildJson;
+  const { diagnostics, ...rest } = json as BuildJson;
+  return { json: rest, diagnostics: Array.isArray(diagnostics) ? (diagnostics as RawDiagnostic[]) : null };
+}
+
+/** The compiler caps at 50 plus one "more not shown" summary. */
+export const MAX_DIAGNOSTICS = 51;
+
+export interface MappedDiagnostic {
+  /** The .page file the line is in; omitted when the line is outside every file (then `line` counts in the merged source). */
+  file?: string;
+  line?: number;
+  column?: number;
+  severity: DiagnosticSeverity;
+  code: string;
+  message: string;
+  fix?: { file: string; line: number; replace: string };
+}
+
+const isLine = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1;
+const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, max) : s);
+
+/**
+ * Translates merged-source lines to file lines and drops anything malformed,
+ * so a compiler bug can never break save_page. Unknown severities read as hints.
+ */
+export function mapDiagnostics(raw: readonly unknown[], map: PageSourceMap): MappedDiagnostic[] {
+  const out: MappedDiagnostic[] = [];
+  for (const entry of raw) {
+    if (out.length >= MAX_DIAGNOSTICS) break;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const d = entry as Record<string, unknown>;
+    if (typeof d.code !== "string" || typeof d.message !== "string") continue;
+    const mapped: MappedDiagnostic = {} as MappedDiagnostic;
+    if (isLine(d.line)) {
+      const at = mapLine(map, d.line);
+      if (at) mapped.file = at.file;
+      mapped.line = at ? at.line : d.line;
+      if (isLine(d.column)) mapped.column = d.column;
+    }
+    mapped.severity = d.severity === "error" || d.severity === "warning" ? d.severity : "hint";
+    mapped.code = clip(d.code, 100);
+    mapped.message = clip(d.message, 300);
+    const fix = d.fix;
+    if (fix && typeof fix === "object" && !Array.isArray(fix)) {
+      const f = fix as Record<string, unknown>;
+      if (isLine(f.line) && typeof f.replace === "string" && f.replace.length <= 500 && !f.replace.includes("\n")) {
+        const at = mapLine(map, f.line);
+        // A fix that maps to no file line could be applied to the wrong file; drop it.
+        if (at) mapped.fix = { file: at.file, line: at.line, replace: f.replace };
+      }
+    }
+    out.push(mapped);
+  }
+  return out;
 }
 
 /** Same placement as the CLI's push: json_content.site.llms_txt. */

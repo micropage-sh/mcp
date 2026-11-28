@@ -353,6 +353,7 @@ describe("save_page", () => {
       project_id: 7,
       build_id: 30,
       version: "2",
+      diagnostics: true,
     });
 
     const patch = callsTo(fake, "PATCH", "/rest/v1/builds");
@@ -686,6 +687,97 @@ describe("save_page", () => {
     const c = await connect(serve(b));
     const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "img: <- hero.png" }] } });
     expect(res.structuredContent).toMatchObject({ issues: ["File not found: hero.png"] });
+  });
+
+  it("returns diagnostics mapped to the .page files and never stores them in json_content", async () => {
+    const b = backend({
+      builds: [build({ id: 30, number: 4, status: "draft" })],
+      parse: () => ({
+        body: {
+          site: {},
+          pages: [{ meta: {}, body: [] }],
+          manifest: {},
+          diagnostics: [
+            { line: 2, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+            { line: 6, column: 1, severity: "hint", code: "unknown-tag", message: "Unknown tag buton:", fix: { line: 6, replace: "button: Go -> /x" } },
+            { severity: "error", code: "dropped-block", message: "1 line dropped" },
+          ],
+        },
+      }),
+    });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({
+      name: "save_page",
+      arguments: {
+        project: UUID,
+        pages: [
+          { name: "landing.page", content: "\n[Home -> /]\nimg: <- a.png\n" },
+          { name: "b.page", content: "[B -> /b]\n/// section\nbuton: Go -> /x" },
+        ],
+      },
+    });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect((callsTo(fake, "POST", "parse")[0]!.body as { diagnostics: unknown }).diagnostics).toBe(true);
+
+    const stored = callsTo(fake, "PATCH", "/rest/v1/builds")[0]!.body as { json_content: Record<string, unknown> };
+    expect(stored.json_content).toEqual({ site: {}, pages: [{ meta: {}, body: [] }], manifest: {} });
+    expect(b.builds.find((x) => x.id === 30)!.json_content).not.toHaveProperty("diagnostics");
+
+    expect(res.structuredContent).toMatchObject({
+      issues: [],
+      diagnostics: [
+        { file: "landing.page", line: 3, column: 1, severity: "warning", code: "missing-alt", message: "Image has no alt text" },
+        {
+          file: "b.page",
+          line: 3,
+          column: 1,
+          severity: "hint",
+          code: "unknown-tag",
+          message: "Unknown tag buton:",
+          fix: { file: "b.page", line: 3, replace: "button: Go -> /x" },
+        },
+        { severity: "error", code: "dropped-block", message: "1 line dropped" },
+      ],
+      next: expect.stringMatching(/fix the 2 error\(s\) and warning\(s\) in diagnostics/),
+    });
+    expect(text(res)).toMatch(/Diagnostics: 1 error\(s\), 1 warning\(s\), 1 hint\(s\)\./);
+  });
+
+  it("reports diagnostics as null, and saves as before, when the compiler sends none", async () => {
+    const b = backend({ builds: [build({ id: 30, number: 4, status: "draft" })] });
+    const fake = serve(b);
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ diagnostics: null, issues: [] });
+    expect((res.structuredContent as { next: string }).next).not.toMatch(/diagnostics/);
+    const summary = (res.content as { text: string }[])[0]!.text.split("\n\n")[0]!;
+    expect(summary).toBe("Updated draft v4 (id 30); not live.");
+    expect(callsTo(fake, "PATCH", "/rest/v1/builds")[0]!.body).toEqual({
+      raw_content: "x",
+      json_content: { site: { title: "New" }, pages: [{ meta: {}, body: [] }] },
+    });
+  });
+
+  it("leaves the hints out of next and counts only real entries", async () => {
+    const b = backend({
+      builds: [build({ id: 30, number: 4, status: "draft" })],
+      parse: () => ({
+        body: {
+          site: {},
+          pages: [{}],
+          diagnostics: [
+            { line: 1, severity: "hint", code: "unknown-tag", message: "m" },
+            { severity: "hint", code: "too-many-diagnostics", message: "4 more not shown" },
+          ],
+        },
+      }),
+    });
+    const c = await connect(serve(b));
+    const res = await c.callTool({ name: "save_page", arguments: { project: UUID, pages: [{ name: "landing.page", content: "x" }] } });
+    expect((res.structuredContent as { next: string }).next).not.toMatch(/diagnostics/);
+    expect(text(res)).toMatch(/Diagnostics: 1 hint\(s\), more not shown\./);
   });
 
   it("rejects bad page names and duplicates before any network call", async () => {
