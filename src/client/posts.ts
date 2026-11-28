@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { STDIO_HINTS, type ModeHints } from "../hints.js";
 import { MicropageError, type MicropageErrorOptions } from "./errors.js";
 import { eq, gt, inList, is, type Http } from "./http.js";
+import { MAX_DIAGNOSTICS, type DiagnosticSeverity } from "./pages.js";
 
 /** Same rule as supabase/functions/_shared/slug.ts and the CLI's slugify. */
 export function slugify(s: string): string {
@@ -380,6 +381,46 @@ export interface UpsertPostResponse extends RebuildField {
   published: boolean;
   /** The post's revision after the save; absent from servers older than the column. */
   revision?: number;
+  /** Line-level findings on body_markdown (e.g. missing-alt); absent from servers older than the check. */
+  diagnostics?: unknown;
+}
+
+/** One upsert-post diagnostic: `line` counts in body_markdown as sent. */
+export interface PostDiagnostic {
+  line?: number;
+  column?: number;
+  severity: DiagnosticSeverity;
+  code: string;
+  message: string;
+}
+
+const isLine = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1;
+const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, max) : s);
+
+/**
+ * upsert-post's diagnostics, validated like mapDiagnostics so a server bug can
+ * never break a save: malformed entries are dropped, unknown severities read
+ * as hints. null when the server sent no array (an older server).
+ */
+export function postDiagnostics(raw: unknown): PostDiagnostic[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: PostDiagnostic[] = [];
+  for (const entry of raw) {
+    if (out.length >= MAX_DIAGNOSTICS) break;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const d = entry as Record<string, unknown>;
+    if (typeof d.code !== "string" || typeof d.message !== "string") continue;
+    const mapped = {} as PostDiagnostic;
+    if (isLine(d.line)) {
+      mapped.line = d.line;
+      if (isLine(d.column)) mapped.column = d.column;
+    }
+    mapped.severity = d.severity === "error" || d.severity === "warning" ? d.severity : "hint";
+    mapped.code = clip(d.code, 100);
+    mapped.message = clip(d.message, 300);
+    out.push(mapped);
+  }
+  return out;
 }
 
 export async function upsertPost(http: Http, payload: UpsertPostPayload): Promise<UpsertPostResponse> {

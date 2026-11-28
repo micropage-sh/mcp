@@ -487,6 +487,86 @@ describe("upsert_post revision check", () => {
   });
 });
 
+describe("upsert_post diagnostics", () => {
+  const MISSING_ALT =
+    "This image has no alt text. Describe it between the brackets, like ![Team photo](team.jpg). For a decorative image, use <img src=\"...\" alt=\"\">.";
+  const saved = (diagnostics?: unknown) => () => ({
+    body: { post_id: "post-new", action: "created", published: false, ...(diagnostics === undefined ? {} : { diagnostics }) },
+  });
+
+  it("returns the server's diagnostics as sent and counts them in the text", async () => {
+    const diagnostics = [
+      { line: 3, column: 1, severity: "warning", code: "missing-alt", message: MISSING_ALT },
+      { line: 9, column: 5, severity: "warning", code: "missing-alt", message: MISSING_ALT },
+    ];
+    const c = await connect(serve(backend({ upsert: saved(diagnostics) })));
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "a\n\n![](https://x/a.png)" } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect((res.structuredContent as { diagnostics: unknown }).diagnostics).toEqual(diagnostics);
+    expect(text(res)).toMatch(/created \(draft\)\. Diagnostics: 2 warning\(s\)\./);
+  });
+
+  it("is an empty list for a clean body, with no summary", async () => {
+    const c = await connect(serve(backend({ upsert: saved([]) })));
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    expect(res.structuredContent).toMatchObject({ diagnostics: [] });
+    expect(text(res)).not.toMatch(/Diagnostics:/);
+  });
+
+  it("is null when the server sends none (an older upsert-post) or a non-array", async () => {
+    for (const value of [undefined, null, "oops", { line: 1 }]) {
+      const c = await connect(serve(backend({ upsert: saved(value) })));
+      const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+      expect(res.isError, text(res)).toBeFalsy();
+      expect(res.structuredContent).toMatchObject({ diagnostics: null });
+      await c.close();
+      client = undefined;
+    }
+  });
+
+  it("drops malformed entries, keeps the summary entry without a line, and reads unknown severities as hints", async () => {
+    const c = await connect(
+      serve(
+        backend({
+          upsert: saved([
+            null,
+            "x",
+            [1],
+            { line: 2, severity: "warning", message: "no code" },
+            { line: 2, severity: "warning", code: "missing-alt" },
+            { line: 0, column: 3, severity: "warning", code: "missing-alt", message: "bad line" },
+            { line: 4, column: -1, severity: "fatal", code: "c".repeat(150), message: "m".repeat(400), fix: { line: 4, replace: "y" } },
+            { severity: "hint", code: "too-many-diagnostics", message: "3 more not shown." },
+          ]),
+        }),
+      ),
+    );
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    expect(res.isError, text(res)).toBeFalsy();
+    expect((res.structuredContent as { diagnostics: unknown }).diagnostics).toEqual([
+      { severity: "warning", code: "missing-alt", message: "bad line" },
+      { line: 4, severity: "hint", code: "c".repeat(100), message: "m".repeat(300) },
+      { severity: "hint", code: "too-many-diagnostics", message: "3 more not shown." },
+    ]);
+    expect(text(res)).toMatch(/Diagnostics: 1 warning\(s\), 1 hint\(s\), more not shown\./);
+  });
+
+  it("caps the list at 51 entries", async () => {
+    const many = Array.from({ length: 80 }, (_, i) => ({ line: i + 1, column: 1, severity: "warning", code: "missing-alt", message: MISSING_ALT }));
+    const c = await connect(serve(backend({ upsert: saved(many) })));
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "T", body_markdown: "b" } });
+    expect((res.structuredContent as { diagnostics: unknown[] }).diagnostics).toHaveLength(51);
+  });
+
+  it("is null for an unchanged save, which never reaches the server", async () => {
+    const fake = serve(backend({ posts: [post()], upsert: saved([{ line: 1, severity: "warning", code: "missing-alt", message: MISSING_ALT }]) }));
+    const c = await connect(fake);
+    const res = await c.callTool({ name: "upsert_post", arguments: { project: "acme", title: "Hello", body_markdown: "Body" } });
+    expect(res.structuredContent).toMatchObject({ action: "unchanged", diagnostics: null });
+    expect(callsTo(fake, "upsert-post")).toHaveLength(0);
+  });
+});
+
 describe("upsert_post unchanged short-circuit", () => {
   const base = { project: "acme", title: "Hello", body_markdown: "Body" };
 

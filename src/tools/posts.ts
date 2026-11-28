@@ -13,6 +13,7 @@ import {
   postMatchesPayload,
   postNotFound,
   postWasEmailed,
+  postDiagnostics,
   postWillEmail,
   publishPost,
   resolveHeroUrl,
@@ -31,7 +32,7 @@ import { getMaxProjectDeployEventId } from "../client/deploy-events.js";
 import { ProjectRef, resolveProject, type Project } from "../client/project-ref.js";
 import type { ToolContext } from "../context.js";
 import { DEFAULT_TOKEN_TTL_MS, elicitConfirmation, requireConfirm, requireConfirmationToken, type TokenPayload } from "../guards.js";
-import { gateTool, structuredResult } from "./shared.js";
+import { diagnosticsSummary, gateTool, structuredResult } from "./shared.js";
 
 const SlugInput = z
   .string()
@@ -306,6 +307,14 @@ export const UpsertPostInput = z
   })
   .strict();
 
+const PostDiagnosticOutput = z.object({
+  line: z.number().int().optional().describe("1-based line in the body_markdown you sent."),
+  column: z.number().int().optional(),
+  severity: z.enum(["error", "warning", "hint"]),
+  code: z.string().describe("Stable id such as missing-alt; new codes may appear."),
+  message: z.string(),
+});
+
 export const UpsertPostOutput = z.object({
   project: ProjectBrief,
   post_id: z.string(),
@@ -321,6 +330,13 @@ export const UpsertPostOutput = z.object({
   list: z.string().nullable(),
   hero: z.string().nullable(),
   revision: z.number().nullable().describe("The post's revision after this call; pass it as `revision` on the next edit."),
+  diagnostics: z
+    .array(PostDiagnosticOutput)
+    .nullable()
+    .describe(
+      "Line-level findings on body_markdown, such as an image without alt text. They never block the save: the post " +
+        "is already saved. Fix them and save again. null = nothing was saved (unchanged) or the server did not report diagnostics.",
+    ),
   warnings: z.array(z.string()),
 });
 export type UpsertPostResult = z.infer<typeof UpsertPostOutput>;
@@ -389,6 +405,7 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
       list: email ? args.list!.trim() : null,
       hero: heroUrl,
       revision: typeof existing.revision === "number" ? existing.revision : null,
+      diagnostics: null,
       warnings,
     };
   }
@@ -436,6 +453,7 @@ export async function runUpsertPost(ctx: ToolContext, args: z.infer<typeof Upser
     list: email ? args.list!.trim() : null,
     hero: heroUrl,
     revision: typeof res.revision === "number" ? res.revision : null,
+    diagnostics: postDiagnostics(res.diagnostics),
     warnings,
   };
 }
@@ -772,7 +790,7 @@ Every call replaces the whole post: an omitted optional field (description, hero
 
 Saving never sends email and never publishes a draft. But if the post is already published, the save changes the live page at once and rebuilds the site, so it needs confirm_live_update: true after the user agrees. ${REBUILD_NOTE} When every field already matches the saved post (a date that keeps the current one counts as matching), nothing is written, no rebuild is queued, no confirmation is needed, and action is "unchanged".
 
-Images are not uploaded here. For the hero pass an https URL or the filename of an asset uploaded with upload_asset; inside body_markdown use hosted URLs only (upload_asset, then get_file_url). To publish afterwards use preview_post_send, then publish_post.`,
+Images are not uploaded here. For the hero pass an https URL or the filename of an asset uploaded with upload_asset; inside body_markdown use hosted URLs only (upload_asset, then get_file_url). The result's diagnostics list line-level findings on body_markdown, such as an image with no alt text (lines count in the body_markdown you sent); the post is saved either way, so fix them and save again. To publish afterwards use preview_post_send, then publish_post.`,
       inputSchema: UpsertPostInput,
       outputSchema: UpsertPostOutput,
       annotations: DESTRUCTIVE,
@@ -785,7 +803,7 @@ Images are not uploaded here. For the hero pass an https URL or the filename of 
           : result.published
             ? "live page updated, site rebuild queued"
             : "draft";
-      return structuredResult(result, `Post "${result.slug}" ${result.action} (${state}).`);
+      return structuredResult(result, `Post "${result.slug}" ${result.action} (${state}).${diagnosticsSummary(result.diagnostics)}`);
     },
   );
 

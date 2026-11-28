@@ -6,7 +6,7 @@ import { BuildRefInput, findBuild, getBuildById, parseBuildRef, saveDraft, type 
 import { CNAME_TARGET, platformDomains } from "../client/config.js";
 import { MicropageError } from "../client/errors.js";
 import { eq, inList } from "../client/http.js";
-import { concatPagesWithMap, type MappedDiagnostic } from "../client/pages.js";
+import { concatPagesWithMap } from "../client/pages.js";
 import {
   PROJECT_COLUMNS,
   ProjectRef,
@@ -18,7 +18,15 @@ import {
 import { EXAMPLES } from "../content/index.js";
 import type { ToolContext } from "../context.js";
 import { elicitConfirmation, requireConfirmMatch } from "../guards.js";
-import { BUILD_SUMMARY_COLUMNS, BuildSummary, ProjectSummary, gateTool, structuredResult } from "./shared.js";
+import {
+  BUILD_SUMMARY_COLUMNS,
+  BuildSummary,
+  ProjectSummary,
+  countDiagnostics,
+  diagnosticsSummary,
+  gateTool,
+  structuredResult,
+} from "./shared.js";
 
 // ---------------------------------------------------------------------------
 // list_projects
@@ -522,24 +530,6 @@ export async function runSavePage(ctx: ToolContext, args: z.infer<typeof SavePag
       (mustFix > 0 ? `, fix the ${mustFix} error(s) and warning(s) in diagnostics, then save_page again` : "") +
       `, and call publish_build (build "id:${saved.build.id}", confirm: true) only when the user asks to publish.`,
   };
-}
-
-type SeverityAndCode = Pick<MappedDiagnostic, "severity" | "code">;
-
-/** Per-severity counts, leaving out the compiler's "more not shown" summary entry. */
-function countDiagnostics(diagnostics: readonly SeverityAndCode[] | null): Record<MappedDiagnostic["severity"], number> {
-  const counts = { error: 0, warning: 0, hint: 0 };
-  for (const d of diagnostics ?? []) if (d.code !== "too-many-diagnostics") counts[d.severity]++;
-  return counts;
-}
-
-/** " Diagnostics: 2 error(s), 1 hint(s)." for the text summary; "" when there are none or none were reported. */
-function diagnosticsSummary(diagnostics: readonly SeverityAndCode[] | null): string {
-  const c = countDiagnostics(diagnostics);
-  const parts = (["error", "warning", "hint"] as const).filter((k) => c[k] > 0).map((k) => `${c[k]} ${k}(s)`);
-  if (parts.length === 0) return "";
-  const more = diagnostics?.some((d) => d.code === "too-many-diagnostics") ? ", more not shown" : "";
-  return ` Diagnostics: ${parts.join(", ")}${more}.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod";
 
+import type { DiagnosticSeverity } from "../client/pages.js";
 import type { ToolContext } from "../context.js";
 import { assertDeployTokenAllows } from "../guards.js";
 
@@ -47,3 +48,21 @@ export const ProjectSummary = z.object({
   live_url: z.string().nullable(),
   editor_url: z.string(),
 });
+
+type SeverityAndCode = { severity: DiagnosticSeverity; code: string };
+
+/** Per-severity counts, leaving out the compiler's "more not shown" summary entry. */
+export function countDiagnostics(diagnostics: readonly SeverityAndCode[] | null): Record<DiagnosticSeverity, number> {
+  const counts = { error: 0, warning: 0, hint: 0 };
+  for (const d of diagnostics ?? []) if (d.code !== "too-many-diagnostics") counts[d.severity]++;
+  return counts;
+}
+
+/** " Diagnostics: 2 error(s), 1 hint(s)." for the text summary; "" when there are none or none were reported. */
+export function diagnosticsSummary(diagnostics: readonly SeverityAndCode[] | null): string {
+  const c = countDiagnostics(diagnostics);
+  const parts = (["error", "warning", "hint"] as const).filter((k) => c[k] > 0).map((k) => `${c[k]} ${k}(s)`);
+  if (parts.length === 0) return "";
+  const more = diagnostics?.some((d) => d.code === "too-many-diagnostics") ? ", more not shown" : "";
+  return ` Diagnostics: ${parts.join(", ")}${more}.`;
+}
